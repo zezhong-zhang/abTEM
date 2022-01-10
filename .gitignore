@@ -2,3 +2,10 @@
 .ipynb_checkpoints
 .pyc
 .egg-info
+abtem/examples/EELS
+abtem/visualize/*.pyc
+abtem.egg-info/top_level.txt
+abtem.egg-info/SOURCES.txt
+abtem.egg-info/requires.txt
+abtem.egg-info/dependency_links.txt
+abtem.egg-info/PKG-INFO
