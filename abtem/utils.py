@@ -19,6 +19,9 @@ def _set_path(path):
 def relativistic_mass_correction(energy: float) -> float:
     return (1 + units._e * energy / (units._me * units._c ** 2))
 
+def relativistic_velocity(energy: float) -> float:
+    return units._c*np.sqrt(1-1/relativistic_mass_correction(energy)**2)
+
 
 def energy2mass(energy: float) -> float:
     """
