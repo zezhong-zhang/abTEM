@@ -23,7 +23,7 @@ def load_electronic_configurations():
 def config_str_to_config_tuples(config_str):
     config_tuples = []
     for subshell_string in config_str.split(' '):
-        config_tuples.append((int(subshell_string[0]), azimuthal_number[subshell_string[1]], int(subshell_string[2])))
+        config_tuples.append((int(subshell_string[0]), azimuthal_number[subshell_string[1]], int(subshell_string[2:])))
     return config_tuples
 
 

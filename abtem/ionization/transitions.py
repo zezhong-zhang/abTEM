@@ -82,6 +82,13 @@ class SubshellTransitions(AbstractTransitionCollection):
         min_new_l = max(self.l - self.order, 0)
         return np.arange(min_new_l, self.l + self.order + 1)
 
+    @property
+    def subshell_occupancy(self):
+        config_tuples = config_str_to_config_tuples(load_electronic_configurations()[chemical_symbols[self.Z]])
+        subshell_index = [shell[:2] for shell in config_tuples].index((self.n, self.l))
+        subshell_occupancy = config_tuples[subshell_index][-1]
+        return subshell_occupancy
+
     def __len__(self):
         return len(self.get_transition_quantum_numbers())
 
@@ -372,6 +379,7 @@ class SubshellTransitions(AbstractTransitionCollection):
                                             continuum_wave=continuum_wave,
                                             l=l,
                                             lprime=lprime,
+                                            subshell_occupancy = self.subshell_occupancy,
                                             energy_loss=energy_loss,
                                             energy = energy,
                                             kmax=kmax,
@@ -725,6 +733,7 @@ class GeneralOsilationStrength:
                  continuum_wave: callable,
                  l: int,
                  lprime: int,
+                 subshell_occupancy: int,
                  energy_loss: float = 1.,
                  energy: float = 3e5,
                  kmin: float = 0.01,
@@ -737,6 +746,7 @@ class GeneralOsilationStrength:
         self._continuum_wave = continuum_wave
         self._l = l
         self._lprime = lprime
+        self.subshell_occupancy=subshell_occupancy
         self.energy_loss = energy_loss
         self.energy = energy
         self.kmax = kmax
@@ -756,7 +766,7 @@ class GeneralOsilationStrength:
             prefactor1 = 2*lprimeprime+1
             prefactor2 = float(wigner_3j(lprime, lprimeprime, l, 0, 0, 0))**2
             jk = self.overlap_integral(self.ksampling, lprimeprime)
-            fk2 += prefactor0*prefactor1*prefactor2*jk**2
+            fk2 += self.subshell_occupancy*prefactor0*prefactor1*prefactor2*jk**2
         return fk2
 
     def _evaluate_gos(self):
