@@ -88,7 +88,7 @@ class SubshellTransitions(AbstractTransitionCollection):
     @property
     def ionization_energy(self):
         atomic_energy, _ = self._calculate_bound()
-        ionic_energy, _ = self._calculate_continuum()
+        ionic_energy, _ = self.get_continuum_potential()
         return ionic_energy - atomic_energy
 
     @property
@@ -131,7 +131,7 @@ class SubshellTransitions(AbstractTransitionCollection):
 
         with open(os.devnull, "w") as f, contextlib.redirect_stdout(f):
             ae = AllElectron(chemical_symbols[self.Z], xcname=self.xc, gpernode=self.gpernode)
-            ae.f_j[subshell_index] -= 1.
+            # ae.f_j[subshell_index] -= 1.
             ae.run()
 
         vr = interp1d(ae.r, ae.vr, fill_value='extrapolate', bounds_error=False)
@@ -146,7 +146,6 @@ class SubshellTransitions(AbstractTransitionCollection):
         continuum_waves = {}
         for lprime in self.lprimes:
             # note: epsilon in the atomic unit for the ODE
-            ur = integrate.odeint(schroedinger_derivative, [0.0, 1.], r, args=(lprime, self.epsilon/units.Rydberg, vr))
 
             sqrt_k = (2 * self.epsilon / units.Hartree * (
                     1 + units.alpha ** 2 * self.epsilon / units.Hartree / 2)) ** .25
@@ -170,7 +169,7 @@ class SubshellTransitions(AbstractTransitionCollection):
             ae.run()
 
         vr = interp1d(ae.r, ae.vr, fill_value='extrapolate', bounds_error=False)
-        return vr
+        return ae.ETotal * units.Hartree, vr
 
     def get_bounded_potential(self):
         from gpaw.atom.all_electron import AllElectron
@@ -184,7 +183,7 @@ class SubshellTransitions(AbstractTransitionCollection):
             ae.run()
 
         vr = interp1d(ae.r, ae.vr, fill_value='extrapolate', bounds_error=False)
-        return vr
+        return ae.ETotal * units.Hartree, vr
 
     def get_bound_wave(self):
         return self._calculate_bound()[1]
@@ -308,7 +307,8 @@ class SubshellTransitions(AbstractTransitionCollection):
             excited_config = []
             for n,l,f in config_tuples:
                 if n == self.n and l == self.l:
-                    excited_config.append(str(n)+["s","p","d","f"][l]+str(f-1))
+                    # excited_config.append(str(n)+["s","p","d","f"][l]+str(f-1))
+                    excited_config.append(str(n)+["s","p","d","f"][l]+str(f))
                 else:
                     excited_config.append(str(n)+["s","p","d","f"][l]+str(f))
             excited_config = ' '.join(excited_config)
@@ -719,22 +719,17 @@ class GeneralOsilationStrength:
         return fk2
 
     def _evaluate_gos(self):
-        gos = self.energy_loss/units.Rydberg\
-        /(self.ksampling*units.Bohr)**2\
-        *self.transition_matrix()
+        gos = self.energy_loss/units.Rydberg/(self.ksampling*units.Bohr)**2*self.transition_matrix()
         return gos
     
     def _evaluate_cross_section(self):
-        scs = 4*relativistic_mass_correction(self.energy)**2\
-        /(units.Bohr**2*self.ksampling**4)\
-        *self.kn/self.k0*self.transition_matrix()
+        scs = 4*relativistic_mass_correction(self.energy)**2/(units.Bohr**2*self.ksampling**4)*self.kn/self.k0*self.transition_matrix()
         return scs
     
     def characteristic_angle(self, unit = 'mrad', relativisitc = True):
         if relativisitc:
             print('relativisitc corrected angle')
-            thetaE = self.energy_loss/relativistic_mass_correction(self.energy)\
-            /units._me/relativistic_velocity(self.energy)**2/units.J
+            thetaE = self.energy_loss/relativistic_mass_correction(self.energy)/units._me/relativistic_velocity(self.energy)**2/units.J
         else:
             print('classical angle theta=E/2E0')
             thetaE = self.energy_loss/2/self.energy
@@ -747,7 +742,7 @@ class GeneralOsilationStrength:
 
     def overlap_integral(self, k, lprimeprime):
         from quadpy.c1 import integrate_adaptive
-        rmax = 100
+        rmax = 200
         grid = k * units.Bohr
         # r = np.linspace(0, rmax, 10000)
 
