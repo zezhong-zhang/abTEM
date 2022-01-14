@@ -141,15 +141,56 @@ class SubshellTransitions(AbstractTransitionCollection):
             (u, up) = y
             # note vr is effective potential multiplied by radius:
             return np.array([up, (l * (l + 1) / r ** 2 + 2 * vr(r) / r - e) * u])
+        
+        def numerov_log(l, e, vr):
+            '''
+            Numerov algorithm
+                        [12 - 10f(n)]*y(n) - y(n-1)*f(n-1)
+                y(n+1) = ------------------------------------
+                                    f(n+1)
+            where
+                f(n) = 1 + (dx**2 / 12)*g(n)
+                g(n) = [(E - 2 Vr/r)*r**2 - (l+1/2)**2]
+                x = log r or r = exp(r)  # log sampling of r, uniform sampling of x 
+                dx = dr/r 
+                y = ur(r(x))/sqrt(r) or ur = y *sqrt(r)
+            '''
+            x = np.linspace(-8,6,1000000)
+            dy = 1
 
-        r = np.geomspace(1e-7, 1000, 10000000)
+            y = np.zeros(x.size)
+            fn = np.zeros(x.size)
+            y[1] = dy
+
+            r = np.exp(x)
+            dx = x[1]-x[0]
+
+            gn = (e - 2*vr(r)/r)*r**2 - (l+1/2)**2
+            fn = 1. + dx**2 / 12 * gn
+
+            for ii in range(1,y.size-1):
+                y[ii+1] = (12 - 10*fn[ii]) * y[ii] - y[ii-1] * fn[ii-1]
+                y[ii+1] /= fn[ii+1]
+            
+            ur = y*np.sqrt(r)
+
+            sqrt_k = (e * (1 + units.alpha ** 2* e/4)) ** .25
+
+            ur = ur / ur.max() / sqrt_k / np.sqrt(np.pi)
+            return r, ur
+
+        # r = np.geomspace(1e-7, 1000, 10000000)
         continuum_waves = {}
         for lprime in self.lprimes:
             # note: epsilon in the atomic unit for the ODE
+            
+            r, ur = numerov_log(l=lprime,e=self.epsilon/units.Rydberg,vr=vr)
+            # ur = integrate.odeint(schroedinger_derivative, [0.0, 1.], r, args=(lprime, self.epsilon/units.Rydberg, vr))
 
-            sqrt_k = (2 * self.epsilon / units.Hartree * (
-                    1 + units.alpha ** 2 * self.epsilon / units.Hartree / 2)) ** .25
-            ur = ur[:, 0] / ur[:, 0].max() / sqrt_k / np.sqrt(np.pi)
+            # sqrt_k = (2 * self.epsilon / units.Hartree * (
+                    # 1 + units.alpha ** 2 * self.epsilon / units.Hartree / 2)) ** .25
+            # ur = ur[:, 0] / ur[:, 0].max() / sqrt_k / np.sqrt(np.pi)
+
             # note: (epsilon in atomic unit)**0.25, see Manson 1972
 
             # continuum_waves[lprime] = (r, ur)  
