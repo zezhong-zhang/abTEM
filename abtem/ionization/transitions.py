@@ -51,6 +51,8 @@ class SubshellTransitions(AbstractTransitionCollection):
 
         self._bound_cache = Cache(1)
         self._continuum_cache = Cache(1)
+        self._bound_potential_cache = Cache(1)
+        self._continuum_potential_cache = Cache(1)
         super().__init__(Z)
 
     @property
@@ -130,80 +132,100 @@ class SubshellTransitions(AbstractTransitionCollection):
 
     @cached_method('_continuum_cache')
     def _calculate_continuum(self):
-        from gpaw.atom.all_electron import AllElectron
+        # from gpaw.atom.all_electron import AllElectron
 
-        check_valid_quantum_number(self.Z, self.n, self.l)
-        config_tuples = config_str_to_config_tuples(load_electronic_configurations()[chemical_symbols[self.Z]])
-        subshell_index = [shell[:2] for shell in config_tuples].index((self.n, self.l))
+        # check_valid_quantum_number(self.Z, self.n, self.l)
+        # config_tuples = config_str_to_config_tuples(load_electronic_configurations()[chemical_symbols[self.Z]])
+        # subshell_index = [shell[:2] for shell in config_tuples].index((self.n, self.l))
 
-        with open(os.devnull, "w") as f, contextlib.redirect_stdout(f):
-            ae = AllElectron(chemical_symbols[self.Z], xcname=self.xc, gpernode=self.gpernode)
-            # ae.f_j[subshell_index] -= 1.
-            ae.run()
+        # with open(os.devnull, "w") as f, contextlib.redirect_stdout(f):
+        #     ae = AllElectron(chemical_symbols[self.Z], xcname=self.xc, gpernode=self.gpernode)
+        #     # ae.f_j[subshell_index] -= 1.
+        #     ae.run()
 
-        vr = interp1d(ae.r, ae.vr, fill_value='extrapolate', bounds_error=False)
+        # vr = interp1d(ae.r, ae.vr, fill_value='extrapolate', bounds_error=False)
         # vr = UnivariateSpline(ae.r, ae.vr)
+        
+
+        
+        # def numerov_log(l, e, vr):
+        #     '''
+        #     Numerov algorithm
+        #                 [12 - 10f(n)]*y(n) - y(n-1)*f(n-1)
+        #         y(n+1) = ------------------------------------
+        #                             f(n+1)
+        #     where
+        #         f(n) = 1 + (dx**2 / 12)*g(n)
+        #         g(n) = [(E - 2 Vr/r)*r**2 - (l+1/2)**2]
+        #         x = log r or r = exp(r)  # log sampling of r, uniform sampling of x 
+        #         dx = dr/r 
+        #         y = ur(r(x))/sqrt(r) or ur = y *sqrt(r)
+        #     '''
+        #     x = np.linspace(-8,6,1000000)
+        #     dy = 1
+
+        #     y = np.zeros(x.size)
+        #     fn = np.zeros(x.size)
+        #     y[1] = dy
+
+        #     r = np.exp(x)
+        #     dx = x[1]-x[0]
+
+        #     gn = (e - 2*vr(r)/r)*r**2 - (l+1/2)**2
+        #     fn = 1. + dx**2 / 12 * gn
+
+        #     for ii in range(1,y.size-1):
+        #         y[ii+1] = (12 - 10*fn[ii]) * y[ii] - y[ii-1] * fn[ii-1]
+        #         y[ii+1] /= fn[ii+1]
+            
+        #     ur = y*np.sqrt(r)
+
+        #     sqrt_k = (e * (1 + units.alpha ** 2* e/4)) ** .25
+
+        #     ur = ur / ur.max() / sqrt_k / np.sqrt(np.pi)
+        #     return r, ur
+
+        etot,vr = self.get_bound_potential()
 
         def schroedinger_derivative(y, r, l, e, vr):
             (u, up) = y
             # note vr is effective potential multiplied by radius:
             return np.array([up, (l * (l + 1) / r ** 2 + 2 * vr(r) / r - e) * u])
-        
-        def numerov_log(l, e, vr):
-            '''
-            Numerov algorithm
-                        [12 - 10f(n)]*y(n) - y(n-1)*f(n-1)
-                y(n+1) = ------------------------------------
-                                    f(n+1)
-            where
-                f(n) = 1 + (dx**2 / 12)*g(n)
-                g(n) = [(E - 2 Vr/r)*r**2 - (l+1/2)**2]
-                x = log r or r = exp(r)  # log sampling of r, uniform sampling of x 
-                dx = dr/r 
-                y = ur(r(x))/sqrt(r) or ur = y *sqrt(r)
-            '''
-            x = np.linspace(-8,6,1000000)
-            dy = 1
 
-            y = np.zeros(x.size)
-            fn = np.zeros(x.size)
-            y[1] = dy
-
-            r = np.exp(x)
-            dx = x[1]-x[0]
-
-            gn = (e - 2*vr(r)/r)*r**2 - (l+1/2)**2
-            fn = 1. + dx**2 / 12 * gn
-
-            for ii in range(1,y.size-1):
-                y[ii+1] = (12 - 10*fn[ii]) * y[ii] - y[ii-1] * fn[ii-1]
-                y[ii+1] /= fn[ii+1]
-            
-            ur = y*np.sqrt(r)
-
-            sqrt_k = (e * (1 + units.alpha ** 2* e/4)) ** .25
-
-            ur = ur / ur.max() / sqrt_k / np.sqrt(np.pi)
-            return r, ur
-
-        # r = np.geomspace(1e-7, 1000, 10000000)
         continuum_waves = {}
         for lprime in self.lprimes:
+            e=self.epsilon/units.Rydberg
+            rc = min(1/np.sqrt(e),10)
+            r0 = max(10/e,5*lprime*(lprime+1),rc,200)
+            rcore = np.geomspace(1e-7,rc,1000)
+            step_size = 1/2/np.sqrt(e)
+            num_step = int(np.ceil((r0-rc)/step_size))
+            rvac = np.linspace(rc,r0,num_step)
+            r = np.unique(np.concatenate((rcore,rvac)))
             # note: epsilon in the atomic unit for the ODE
             
-            r, ur = numerov_log(l=lprime,e=self.epsilon/units.Rydberg,vr=vr)
-            # ur = integrate.odeint(schroedinger_derivative, [0.0, 1.], r, args=(lprime, self.epsilon/units.Rydberg, vr))
+            # r, ur = numerov_log(l=lprime,e=self.epsilon/units.Rydberg,vr=vr)
+            ur = integrate.odeint(schroedinger_derivative, [0.0, 1.], r, args=(lprime, e, vr))[:,0]
 
-            # sqrt_k = (2 * self.epsilon / units.Hartree * (
-                    # 1 + units.alpha ** 2 * self.epsilon / units.Hartree / 2)) ** .25
-            # ur = ur[:, 0] / ur[:, 0].max() / sqrt_k / np.sqrt(np.pi)
+            sqrt_k = (2 * self.epsilon / units.Hartree * (
+                    1 + units.alpha ** 2 * self.epsilon / units.Hartree / 2)) ** .25
 
-            # note: (epsilon in atomic unit)**0.25, see Manson 1972
+            from scipy.interpolate import InterpolatedUnivariateSpline
+            ur_i = InterpolatedUnivariateSpline(r, ur, k=4)
+            cr_pts = ur_i.derivative().roots()
+            cr_vals = ur_i(cr_pts)
+            rf = cr_pts[-1]
+            A = 1 - 1/2/e/rf*(1 - 5/3/e/rf - lprime*(lprime+1)/2/rf)
+            B = abs(cr_vals[-1])
+            ur = ur *A / B / sqrt_k / np.sqrt(np.pi)
+
+            # note: sqrt_k = (epsilon in atomic unit)**0.25, see Manson 1972
 
             # continuum_waves[lprime] = (r, ur)  
             continuum_waves[lprime] = interp1d(r, ur, kind='cubic', fill_value='extrapolate', bounds_error=False)
-        return ae.ETotal * units.Hartree, continuum_waves
-
+        return etot, continuum_waves
+    
+    @cached_method('_continuum_potential_cache')
     def get_continuum_potential(self):
         from gpaw.atom.all_electron import AllElectron
 
@@ -219,7 +241,8 @@ class SubshellTransitions(AbstractTransitionCollection):
         vr = interp1d(ae.r, ae.vr, fill_value='extrapolate', bounds_error=False)
         return ae.ETotal * units.Hartree, vr
 
-    def get_bounded_potential(self):
+    @cached_method('_bound_potential_cache')
+    def get_bound_potential(self):
         from gpaw.atom.all_electron import AllElectron
 
         check_valid_quantum_number(self.Z, self.n, self.l)
@@ -338,6 +361,7 @@ class SubshellTransitions(AbstractTransitionCollection):
                 kgpts: int = 1024,
                 ionization_energy: float = None,
                 energy: float = 3e5,
+                export_angle = False,
                 pbar=True,
                 dirac=False):
 
@@ -392,7 +416,10 @@ class SubshellTransitions(AbstractTransitionCollection):
         pbar.refresh()
         pbar.close()
         # gos_sum = np.sum(gos_list,axis=0)
-        ksampling = gos.ksampling
+        if export_angle:
+            sampling = gos.angle
+        else:
+            ksampling = gos.ksampling
         return gos_list,ksampling
 
 class SubshellTransitionsArrays:
@@ -773,7 +800,7 @@ class GeneralOsilationStrength:
         gos = self.energy_loss/units.Rydberg/(self.ksampling*units.Bohr)**2*self.transition_matrix()
         return gos
     
-    def _evaluate_cross_section(self):
+    def _evaluate_double_diff_cross_section(self):
         scs = 4*relativistic_mass_correction(self.energy)**2/(units.Bohr**2*self.ksampling**4)*self.kn/self.k0*self.transition_matrix()
         return scs
     
