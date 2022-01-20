@@ -102,8 +102,6 @@ class SubshellTransitions(AbstractTransitionCollection):
 
     @property
     def energy_loss(self):
-        atomic_energy, _ = self._calculate_bound()
-        ionic_energy, _ = self._calculate_continuum()
         return self.ionization_energy + self.epsilon
     
     @property
@@ -197,7 +195,7 @@ class SubshellTransitions(AbstractTransitionCollection):
             e=self.epsilon/units.Rydberg
             rc = min(1/np.sqrt(e),10)
             r0 = max(10/e,5*lprime*(lprime+1),rc,200)
-            rcore = np.geomspace(1e-7,rc,1000)
+            rcore = np.geomspace(1e-7,rc,10000)
             step_size = 1/2/np.sqrt(e)
             num_step = int(np.ceil((r0-rc)/step_size))
             rvac = np.linspace(rc,r0,num_step)
@@ -207,8 +205,9 @@ class SubshellTransitions(AbstractTransitionCollection):
             # r, ur = numerov_log(l=lprime,e=self.epsilon/units.Rydberg,vr=vr)
             ur = integrate.odeint(schroedinger_derivative, [0.0, 1.], r, args=(lprime, e, vr))[:,0]
 
-            sqrt_k = (2 * self.epsilon / units.Hartree * (
-                    1 + units.alpha ** 2 * self.epsilon / units.Hartree / 2)) ** .25
+            # sqrt_k = (2 * self.epsilon / units.Hartree * (
+            #         1 + units.alpha ** 2 * self.epsilon / units.Hartree / 2)) ** .25
+            sqrt_k = (self.epsilon/units.Rydberg) ** .25
 
             from scipy.interpolate import InterpolatedUnivariateSpline
             ur_i = InterpolatedUnivariateSpline(r, ur, k=4)
@@ -419,8 +418,8 @@ class SubshellTransitions(AbstractTransitionCollection):
         if export_angle:
             sampling = gos.angle
         else:
-            ksampling = gos.ksampling
-        return gos_list,ksampling
+            sampling = gos.ksampling
+        return gos_list,sampling
 
 class SubshellTransitionsArrays:
 
@@ -781,10 +780,9 @@ class GeneralOsilationStrength:
         self.kgpts = kgpts 
         # self._cache = Cache(1)
 
-    def transition_matrix(self):
+    def dynamic_form_factor(self):
         from sympy.physics.wigner import wigner_3j
-
-        fk2 = np.zeros(self.ksampling.shape, dtype=np.float64)
+        s2 = np.zeros(self.ksampling.shape, dtype=np.float64)
         l = self._l
         lprime = self._lprime
         # lprimeprime only valid from |l-lprime| to l+lprime in step of 2, see Manson 1972 
@@ -793,15 +791,21 @@ class GeneralOsilationStrength:
             prefactor1 = 2*lprimeprime+1
             prefactor2 = float(wigner_3j(lprime, lprimeprime, l, 0, 0, 0))**2
             jk = self.overlap_integral(self.ksampling, lprimeprime)
-            fk2 += self.subshell_occupancy*prefactor0*prefactor1*prefactor2*jk**2
-        return fk2
+            s2 += self.subshell_occupancy*prefactor0*prefactor1*prefactor2*jk**2
+        return s2
 
     def _evaluate_gos(self):
-        gos = self.energy_loss/units.Rydberg/(self.ksampling*units.Bohr)**2*self.transition_matrix()
+        gos = self.energy_loss/units.Rydberg/(self.ksampling*units.Bohr)**2*self.dynamic_form_factor()
+        # to remove the divergence behaviour at q->0 when delta l = 0
+        if self._lprime == self._l:
+            idx = self.ksampling > 1
+            ksampling_new = np.insert(self.ksampling[idx], 0, 0, axis=0) 
+            gos_new  = np.insert(gos[idx], 0, 0, axis=0) 
+            gos = interp1d(ksampling_new,gos_new)(self.ksampling)
         return gos
     
     def _evaluate_double_diff_cross_section(self):
-        scs = 4*relativistic_mass_correction(self.energy)**2/(units.Bohr**2*self.ksampling**4)*self.kn/self.k0*self.transition_matrix()
+        scs = 4*relativistic_mass_correction(self.energy)**2/(units.Bohr**2*self.ksampling**4)*self.kn/self.k0*self.dynamic_form_factor()
         return scs
     
     def characteristic_angle(self, unit = 'mrad', relativisitc = True):
