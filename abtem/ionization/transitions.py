@@ -20,6 +20,7 @@ from abtem.utils import energy2wavelength, spatial_frequencies, polar_coordinate
     relativistic_mass_correction, relativistic_velocity, fourier_translation_operator
 from abtem.utils import ProgressBar
 from abtem.structures import SlicedAtoms
+from quadpy.c1 import integrate_adaptive
 
 
 class AbstractTransitionCollection(metaclass=ABCMeta):
@@ -97,7 +98,10 @@ class SubshellTransitions(AbstractTransitionCollection):
     @property
     def ionization_energy(self):
         atomic_energy, _ = self._calculate_bound()
-        ionic_energy, _ = self.get_continuum_potential()
+        if self.dirac == True:
+            ionic_energy = 0.0
+        else:
+            ionic_energy, _ = self._calculate_continuum()
         return ionic_energy - atomic_energy
 
     @property
@@ -114,115 +118,77 @@ class SubshellTransitions(AbstractTransitionCollection):
 
     @cached_method('_bound_cache')
     def _calculate_bound(self):
-        from gpaw.atom.all_electron import AllElectron
+        if self.dirac is False:
+            from gpaw.atom.all_electron import AllElectron
 
-        check_valid_quantum_number(self.Z, self.n, self.l)
-        config_tuples = config_str_to_config_tuples(load_electronic_configurations()[chemical_symbols[self.Z]])
-        subshell_index = [shell[:2] for shell in config_tuples].index((self.n, self.l))
+            check_valid_quantum_number(self.Z, self.n, self.l)
+            config_tuples = config_str_to_config_tuples(load_electronic_configurations()[chemical_symbols[self.Z]])
+            subshell_index = [shell[:2] for shell in config_tuples].index((self.n, self.l))
 
-        with open(os.devnull, "w") as f, contextlib.redirect_stdout(f):
-            ae = AllElectron(chemical_symbols[self.Z], xcname=self.xc, gpernode=self.gpernode)
-            ae.run()
+            with open(os.devnull, "w") as f, contextlib.redirect_stdout(f):
+                ae = AllElectron(chemical_symbols[self.Z], xcname=self.xc, gpernode=self.gpernode)
+                ae.run()
 
-        wave = interp1d(ae.r, ae.u_j[subshell_index], kind='cubic', fill_value='extrapolate', bounds_error=False)
-        # return ae.ETotal * units.Hartree, (ae.r, ae.u_j[subshell_index])
-        return ae.ETotal * units.Hartree, wave
+            wave = interp1d(ae.r, ae.u_j[subshell_index], kind='cubic', fill_value='extrapolate', bounds_error=False)
+            # return ae.ETotal * units.Hartree, (ae.r, ae.u_j[subshell_index])
+            return ae.ETotal * units.Hartree, wave
+        else:
+            from abtem.ionization.dirac import orbital
+            orb = orbital(Z=self.Z,n=self.n,l=self.l,lprimes=self.lprimes,epsilons=self.epsilon)
+            wave = orb.get_bound_wave()
+            ETotal = orb.energy
+            return ETotal, wave 
+
 
     @cached_method('_continuum_cache')
     def _calculate_continuum(self):
-        # from gpaw.atom.all_electron import AllElectron
+        if self.dirac is False:
+            _,vr = self.get_bound_potential()
+            etot,_ = self.get_continuum_potential()
+            def schroedinger_derivative(y, r, l, e, vr):
+                (u, up) = y
+                # note vr is effective potential multiplied by radius:
+                return np.array([up, (l * (l + 1) / r ** 2 + 2 * vr(r) / r - e) * u])
 
-        # check_valid_quantum_number(self.Z, self.n, self.l)
-        # config_tuples = config_str_to_config_tuples(load_electronic_configurations()[chemical_symbols[self.Z]])
-        # subshell_index = [shell[:2] for shell in config_tuples].index((self.n, self.l))
+            continuum_waves = {}
+            for lprime in self.lprimes:
+                e=self.epsilon/units.Rydberg
+                rc = min(1/np.sqrt(e),50)
+                r0 = max(10/np.sqrt(e),5*lprime*(lprime+1),rc,200)
+                rcore = np.geomspace(1e-7,rc,10000)
+                step_size = 1/2/e**0.25
+                num_step = int(np.ceil((r0-rc)/step_size))
+                rvac = np.linspace(rc,r0,num_step)
+                r = np.unique(np.concatenate((rcore,rvac)))
+                # note: epsilon in the atomic unit for the ODE
+                ur = integrate.odeint(schroedinger_derivative, [0.0, 1.], r, args=(lprime, e, vr))[:,0]
 
-        # with open(os.devnull, "w") as f, contextlib.redirect_stdout(f):
-        #     ae = AllElectron(chemical_symbols[self.Z], xcname=self.xc, gpernode=self.gpernode)
-        #     # ae.f_j[subshell_index] -= 1.
-        #     ae.run()
+                # sqrt_k = (2 * self.epsilon / units.Hartree * (
+                #         1 + units.alpha ** 2 * self.epsilon / units.Hartree / 2)) ** .25
+                sqrt_k = (self.epsilon/units.Rydberg) ** .25
 
-        # vr = interp1d(ae.r, ae.vr, fill_value='extrapolate', bounds_error=False)
-        # vr = UnivariateSpline(ae.r, ae.vr)
-        
+                from scipy.interpolate import InterpolatedUnivariateSpline
+                ur_i = InterpolatedUnivariateSpline(r, ur, k=4)
+                cr_pts = ur_i.derivative().roots()
+                cr_vals = ur_i(cr_pts)
+                rf = cr_pts[-1]
+                A = 1 - 1/2/e/rf*(1 - 5/3/e/rf - lprime*(lprime+1)/2/rf)
+                B = abs(cr_vals[-1])
+                ur = ur *A / B / sqrt_k / np.sqrt(np.pi)
 
-        
-        # def numerov_log(l, e, vr):
-        #     '''
-        #     Numerov algorithm
-        #                 [12 - 10f(n)]*y(n) - y(n-1)*f(n-1)
-        #         y(n+1) = ------------------------------------
-        #                             f(n+1)
-        #     where
-        #         f(n) = 1 + (dx**2 / 12)*g(n)
-        #         g(n) = [(E - 2 Vr/r)*r**2 - (l+1/2)**2]
-        #         x = log r or r = exp(r)  # log sampling of r, uniform sampling of x 
-        #         dx = dr/r 
-        #         y = ur(r(x))/sqrt(r) or ur = y *sqrt(r)
-        #     '''
-        #     x = np.linspace(-8,6,1000000)
-        #     dy = 1
+                # note: sqrt_k = (epsilon in atomic unit)**0.25, see Manson 1972
 
-        #     y = np.zeros(x.size)
-        #     fn = np.zeros(x.size)
-        #     y[1] = dy
-
-        #     r = np.exp(x)
-        #     dx = x[1]-x[0]
-
-        #     gn = (e - 2*vr(r)/r)*r**2 - (l+1/2)**2
-        #     fn = 1. + dx**2 / 12 * gn
-
-        #     for ii in range(1,y.size-1):
-        #         y[ii+1] = (12 - 10*fn[ii]) * y[ii] - y[ii-1] * fn[ii-1]
-        #         y[ii+1] /= fn[ii+1]
-            
-        #     ur = y*np.sqrt(r)
-
-        #     sqrt_k = (e * (1 + units.alpha ** 2* e/4)) ** .25
-
-        #     ur = ur / ur.max() / sqrt_k / np.sqrt(np.pi)
-        #     return r, ur
-
-        etot,vr = self.get_bound_potential()
-
-        def schroedinger_derivative(y, r, l, e, vr):
-            (u, up) = y
-            # note vr is effective potential multiplied by radius:
-            return np.array([up, (l * (l + 1) / r ** 2 + 2 * vr(r) / r - e) * u])
-
-        continuum_waves = {}
-        for lprime in self.lprimes:
-            e=self.epsilon/units.Rydberg
-            rc = min(1/np.sqrt(e),10)
-            r0 = max(10/e,5*lprime*(lprime+1),rc,200)
-            rcore = np.geomspace(1e-7,rc,10000)
-            step_size = 1/2/np.sqrt(e)
-            num_step = int(np.ceil((r0-rc)/step_size))
-            rvac = np.linspace(rc,r0,num_step)
-            r = np.unique(np.concatenate((rcore,rvac)))
-            # note: epsilon in the atomic unit for the ODE
-            
-            # r, ur = numerov_log(l=lprime,e=self.epsilon/units.Rydberg,vr=vr)
-            ur = integrate.odeint(schroedinger_derivative, [0.0, 1.], r, args=(lprime, e, vr))[:,0]
-
-            # sqrt_k = (2 * self.epsilon / units.Hartree * (
-            #         1 + units.alpha ** 2 * self.epsilon / units.Hartree / 2)) ** .25
-            sqrt_k = (self.epsilon/units.Rydberg) ** .25
-
-            from scipy.interpolate import InterpolatedUnivariateSpline
-            ur_i = InterpolatedUnivariateSpline(r, ur, k=4)
-            cr_pts = ur_i.derivative().roots()
-            cr_vals = ur_i(cr_pts)
-            rf = cr_pts[-1]
-            A = 1 - 1/2/e/rf*(1 - 5/3/e/rf - lprime*(lprime+1)/2/rf)
-            B = abs(cr_vals[-1])
-            ur = ur *A / B / sqrt_k / np.sqrt(np.pi)
-
-            # note: sqrt_k = (epsilon in atomic unit)**0.25, see Manson 1972
-
-            # continuum_waves[lprime] = (r, ur)  
-            continuum_waves[lprime] = interp1d(r, ur, kind='cubic', fill_value='extrapolate', bounds_error=False)
-        return etot, continuum_waves
+                # continuum_waves[lprime] = (r, ur)  
+                continuum_waves[lprime] = interp1d(r, ur, kind='cubic', fill_value='extrapolate', bounds_error=False)
+            return etot, continuum_waves
+        else:
+            from abtem.ionization.dirac import orbital
+            orb = orbital(Z=self.Z,n=0,l=self.l,lprimes=self.lprimes,epsilons=self.epsilon)
+            continuum_waves = orb.get_continuum_waves()
+            ETotal = self.epsilon
+            if isinstance(self.epsilon, int) or isinstance(self.epsilon, float):
+                continuum_waves = continuum_waves[0]
+            return ETotal, continuum_waves
     
     @cached_method('_continuum_potential_cache')
     def get_continuum_potential(self):
@@ -300,30 +266,13 @@ class SubshellTransitions(AbstractTransitionCollection):
                                   gpts: Union[float, Sequence[float]] = None,
                                   sampling: Union[float, Sequence[float]] = None,
                                   energy: float = None,
-                                  pbar=True,
-                                  dirac=False):
+                                  pbar=True):
 
         transitions = []
         if isinstance(pbar, bool):
             pbar = ProgressBar(total=len(self), desc='Transitions', disable=(not pbar))
-        if dirac is False:
             _, bound_wave = self._calculate_bound()
             _, continuum_waves = self._calculate_continuum()
-        else:
-            from pyms.Ionization import orbital 
-            config_tuples = config_str_to_config_tuples(load_electronic_configurations()[chemical_symbols[self.Z]])
-            bound_config = ' '.join(["".join(str(n)+["s","p","d","f"][l]+str(f)) for n,l,f in config_tuples]) 
-            excited_config = []
-            for n,l,f in config_tuples:
-                if n == self.n and l == self.l:
-                    excited_config.append(str(n)+["s","p","d","f","g","h","i"][l]+str(f-1))
-                else:
-                    excited_config.append(str(n)+["s","p","d","f","g","h","i"][l]+str(f))
-            excited_config = ' '.join(excited_config)
-            bound_wave = orbital(self.Z,bound_config,self.n,self.l)
-            continuum_waves = []
-            for lprime in self.lprimes:
-                continuum_waves.append(orbital(self.Z,excited_config,n=0,ell=lprime,epsilon=self.epsilon))
         energy_loss = self.energy_loss
 
         # bound_wave = interp1d(*bound_wave, kind='cubic', fill_value='extrapolate', bounds_error=False)
@@ -350,76 +299,6 @@ class SubshellTransitions(AbstractTransitionCollection):
         pbar.refresh()
         pbar.close()
         return transitions
-    
-    def get_gos(self,
-                # extent: Union[float, Sequence[float]] = None,
-                # gpts: Union[float, Sequence[float]] = None,
-                # sampling: Union[float, Sequence[float]] = None,
-                kmax: float = 20,
-                kmin: float = 0.01,
-                kgpts: int = 1024,
-                ionization_energy: float = None,
-                energy: float = 3e5,
-                export_angle = False,
-                pbar=True,
-                dirac=False):
-
-        gos_list = []
-        if isinstance(pbar, bool):
-            pbar = ProgressBar(total=len(self.lprimes), desc='Transitions', disable=(not pbar))
-
-        if dirac is False:
-            _, bound_wave = self._calculate_bound()
-            _, continuum_waves = self._calculate_continuum()
-        else:
-            from pyms.Ionization import orbital 
-            config_tuples = config_str_to_config_tuples(load_electronic_configurations()[chemical_symbols[self.Z]])
-            bound_config = ' '.join(["".join(str(n)+["s","p","d","f"][l]+str(f)) for n,l,f in config_tuples]) 
-            excited_config = []
-            for n,l,f in config_tuples:
-                if n == self.n and l == self.l:
-                    # excited_config.append(str(n)+["s","p","d","f"][l]+str(f-1))
-                    excited_config.append(str(n)+["s","p","d","f"][l]+str(f))
-                else:
-                    excited_config.append(str(n)+["s","p","d","f"][l]+str(f))
-            excited_config = ' '.join(excited_config)
-            bound_wave = orbital(self.Z,bound_config,self.n,self.l)
-            continuum_waves = []
-            for lprime in self.lprimes:
-                continuum_waves.append(orbital(self.Z,excited_config,n=0,ell=lprime,epsilon=self.epsilon))
-
-        if ionization_energy is not None:
-            energy_loss = self.epsilon + ionization_energy
-        else:
-            energy_loss = self.energy_loss
-
-        for lprime in self.lprimes:
-            l = self.l
-            continuum_wave = continuum_waves[lprime]
-
-            gos = GeneralOsilationStrength(Z=self.Z,
-                                            bound_wave=bound_wave,
-                                            continuum_wave=continuum_wave,
-                                            l=l,
-                                            lprime=lprime,
-                                            subshell_occupancy = self.subshell_occupancy,
-                                            energy_loss=energy_loss,
-                                            energy = energy,
-                                            kmax=kmax,
-                                            kmin=kmin,
-                                            kgpts=kgpts,
-                                            )
-            gos_list += [gos._evaluate_gos()]
-            pbar.update(1)
-        
-        pbar.refresh()
-        pbar.close()
-        # gos_sum = np.sum(gos_list,axis=0)
-        if export_angle:
-            sampling = gos.angle
-        else:
-            sampling = gos.ksampling
-        return gos_list,sampling
 
 class SubshellTransitionsArrays:
 
@@ -754,59 +633,88 @@ class TransitionPotential(HasAcceleratorMixin, HasGridMixin):
 
 class GeneralOsilationStrength:
     def __init__(self,
-                 Z: int,
-                 bound_wave: callable,
-                 continuum_wave: callable,
-                 l: int,
-                 lprime: int,
-                 subshell_occupancy: int,
-                 energy_loss: float = 1.,
+                 transitions,
                  energy: float = 3e5,
-                 kmin: float = 0.01,
-                 kmax: float = 20,
-                 kgpts: int = 1024
+                 qmin: float = 0.01,
+                 qmax: float = 20,
+                 qgpts: int = 1024,
+                 ionization_energy: float = None,
+                 collection_angle: float = 1,
                  ):
 
-        self.Z = Z 
-        self._bound_wave = bound_wave
-        self._continuum_wave = continuum_wave
-        self._l = l
-        self._lprime = lprime
-        self.subshell_occupancy=subshell_occupancy
-        self.energy_loss = energy_loss
+        self.Z = transitions.Z
+        self._bound_wave = transitions.get_bound_wave()
+        self._continuum_waves = transitions.get_continuum_waves()
+        self.l = transitions.l
+        self.lprimes = transitions.lprimes
+        self.subshell_occupancy=transitions.subshell_occupancy
+        
+        if ionization_energy is not None:
+            self.energy_loss = transitions.epsilon + ionization_energy
+        else:
+            self.energy_loss = transitions.energy_loss
+
         self.energy = energy
-        self.kmax = kmax
-        self.kmin = kmin
-        self.kgpts = kgpts 
+        self.qmax = qmax
+        self.qmin = qmin
+        self.qgpts = qgpts
+        self.collection_angle = collection_angle
+        self._dynamic_form_factor_cache = Cache(1)
         # self._cache = Cache(1)
 
+    @cached_method('_dynamic_form_factor_cache')
     def dynamic_form_factor(self):
         from sympy.physics.wigner import wigner_3j
-        s2 = np.zeros(self.ksampling.shape, dtype=np.float64)
-        l = self._l
-        lprime = self._lprime
-        # lprimeprime only valid from |l-lprime| to l+lprime in step of 2, see Manson 1972 
-        prefactor0 = 2*lprime+1
-        for lprimeprime in range(abs(l - lprime), np.abs(l + lprime) + 1, 2):
-            prefactor1 = 2*lprimeprime+1
-            prefactor2 = float(wigner_3j(lprime, lprimeprime, l, 0, 0, 0))**2
-            jk = self.overlap_integral(self.ksampling, lprimeprime)
-            s2 += self.subshell_occupancy*prefactor0*prefactor1*prefactor2*jk**2
-        return s2
+        s2_list = []
+        l = self.l
+        for lprime in self.lprimes:
+            s2 = np.zeros(self.qsampling.shape, dtype=np.float64)
+            prefactor0 = 2*lprime+1
+            # lprimeprime only valid from |l-lprime| to l+lprime in step of 2, see Manson 1972 
+            for lprimeprime in range(abs(l - lprime), np.abs(l + lprime) + 1, 2):
+                prefactor1 = 2*lprimeprime+1
+                prefactor2 = float(wigner_3j(lprime, lprimeprime, l, 0, 0, 0))**2
+                jk = self.overlap_integral(self.qsampling, lprime, lprimeprime)
+                s2 += self.subshell_occupancy*prefactor0*prefactor1*prefactor2*jk**2
+            s2_list.append(s2)
+        return s2_list
 
-    def _evaluate_gos(self):
-        gos = self.energy_loss/units.Rydberg/(self.ksampling*units.Bohr)**2*self.dynamic_form_factor()
+    def get_gos(self):
+        gos_list=[]
+        for lprime in self.lprimes:
+            gos = self.energy_loss/units.Rydberg/(self.qsampling*units.Bohr)**2*self.dynamic_form_factor()[lprime]
+            gos_list.append(gos)
         # to remove the divergence behaviour at q->0 when delta l = 0
-        if self._lprime == self._l:
-            idx = self.ksampling > 1
-            ksampling_new = np.insert(self.ksampling[idx], 0, 0, axis=0) 
-            gos_new  = np.insert(gos[idx], 0, 0, axis=0) 
-            gos = interp1d(ksampling_new,gos_new)(self.ksampling)
-        return gos
+        # if self._lprime == self._l:
+        #     idx = self.qsampling > 1
+        #     qsampling_new = np.insert(self.qsampling[idx], 0, 0, axis=0) 
+        #     gos_new  = np.insert(gos[idx], 0, 0, axis=0) 
+        #     gos = interp1d(qsampling_new,gos_new)(self.qsampling)
+        return gos_list
     
-    def _evaluate_double_diff_cross_section(self):
-        scs = 4*relativistic_mass_correction(self.energy)**2/(units.Bohr**2*self.ksampling**4)*self.kn/self.k0*self.dynamic_form_factor()
-        return scs
+    def double_diff_cross_section_dE_dOmega(self):
+        scs_list=[]
+        for lprime in self.lprimes:
+            scs = 4*relativistic_mass_correction(self.energy)**2/(units.Bohr**2*self.qsampling**4)*self.kn/self.k0*self.dynamic_form_factor()[lprime]
+            scs_list.append(scs)
+        return scs_list
+    
+    def double_diff_cross_section_dE_dlnQ(self):
+        scs_list=[]
+        for lprime in self.lprimes:
+            scs = 4*np.pi*relativistic_mass_correction(self.energy)**2/self.Q/self.k0**2*self.dynamic_form_factor()[lprime]
+            scs_list.append(scs)
+        return scs_list
+
+    def get_diff_cross_section(self):
+        scs_list=[]
+        Qmax = (self.k0**2+self.kn**2-2*self.kn*self.k0*np.cos(self.collection_angle/1000))*units.Bohr**2
+        ln_Qmax = np.log(Qmax)
+        for lprime in self.lprimes:
+            func = interp1d(np.log(self.Q), self.double_diff_cross_section_dE_dlnQ()[lprime])
+            value,err = integrate_adaptive(func,[0,ln_Qmax],eps_rel=1e-10)
+            scs_list.append(value)
+        return scs_list
     
     def characteristic_angle(self, unit = 'mrad', relativisitc = True):
         if relativisitc:
@@ -822,34 +730,35 @@ class GeneralOsilationStrength:
             print('unit in A-1')
             return thetaE/energy2wavelength(self.energy)
 
-    def overlap_integral(self, k, lprimeprime):
-        from quadpy.c1 import integrate_adaptive
-        rmax = 200
+    def overlap_integral(self, k, lprime, lprimeprime):
         grid = k * units.Bohr
-        # r = np.linspace(0, rmax, 10000)
+        rmax = 200
 
         func = lambda r:(self._bound_wave(r) *
                         spherical_jn(lprimeprime, grid[:, None] * r[None]) 
-                        * self._continuum_wave(r))
+                        * self._continuum_waves[lprime](r))
 
-        values,err = integrate_adaptive(func,[0,rmax],eps_rel=1e-10)
-        return values
+        value,err = integrate_adaptive(func,[0,rmax],eps_rel=1e-10)
+        return value
 
     @property
-    def ksampling(self):
-        return 2*np.pi*np.geomspace(self.kmin, self.kmax, num=self.kgpts)
+    def qsampling(self):
+        return np.geomspace(self.qmin, self.qmax, num=self.qgpts)
+
+    @property
+    def Q(self):
+        return (units.Bohr*self.qsampling)**2
 
     @property
     def angle(self):
-        theta = np.arccos((self.k0**2+self.kn**2-(self.ksampling/2/np.pi)**2)
-            /(2*self.k0*self.kn))
+        theta = np.arccos((self.k0**2+self.kn**2-(self.qsampling)**2)/(2*self.k0*self.kn))
         print('unit in mrad')
         return theta*1e3
 
     @property
     def k0(self):
-        return 1/energy2wavelength(self.energy)
+        return 1 /energy2wavelength(self.energy)
     
     @property
     def kn(self):
-        return 1/energy2wavelength(self.energy-self.energy_loss)
+        return 1 /energy2wavelength(self.energy-self.energy_loss)

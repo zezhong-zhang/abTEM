@@ -1,2 +1,2 @@
-from abtem.ionization.transitions import SubshellTransitions, TransitionPotential
+from abtem.ionization.transitions import SubshellTransitions, TransitionPotential, GeneralOsilationStrength
 from abtem.ionization.detect import EELSDetector
