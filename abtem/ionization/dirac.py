@@ -11,15 +11,15 @@ class orbital:
 
     Code originally from py_multislice by Hamish Brown, adpated for abTEM by Zezhong Zhang. 
     """
-    def __init__(self, Z: int, n: int, l: int, lprimes, epsilons):
+    def __init__(self, Z: int, n: int, l: int, lprimes, epsilon):
         self.Z = Z
         self.n = n
         self.l = l
         self.lprimes = lprimes
-        if isinstance(epsilons, np.ndarray):
-            self.epsilons = epsilons
+        if isinstance(epsilon, np.ndarray):
+            self.epsilon = epsilon
         else:
-            self.epsilons = np.asarray([epsilons]).flatten()
+            self.epsilon = np.asarray([epsilon]).flatten()
 
     @property
     def config(self,ionised=False):
@@ -111,7 +111,7 @@ class orbital:
         fac.ConfigEnergy(1)
 
         continum_waves = []
-        for epsilon in self.epsilons:
+        for epsilon in self.epsilon:
             continum_waves_per_epsilon = []
             for k in self.kappa:
                 fac.WaveFuncTable("orbital.txt", self.n, k, epsilon)

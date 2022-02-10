@@ -134,7 +134,7 @@ class SubshellTransitions(AbstractTransitionCollection):
             return ae.ETotal * units.Hartree, wave
         else:
             from abtem.ionization.dirac import orbital
-            orb = orbital(Z=self.Z,n=self.n,l=self.l,lprimes=self.lprimes,epsilons=self.epsilon)
+            orb = orbital(Z=self.Z,n=self.n,l=self.l,lprimes=self.lprimes,epsilon=self.epsilon)
             wave = orb.get_bound_wave()
             ETotal = orb.energy
             return ETotal, wave 
@@ -183,7 +183,7 @@ class SubshellTransitions(AbstractTransitionCollection):
             return etot, continuum_waves
         else:
             from abtem.ionization.dirac import orbital
-            orb = orbital(Z=self.Z,n=0,l=self.l,lprimes=self.lprimes,epsilons=self.epsilon)
+            orb = orbital(Z=self.Z,n=0,l=self.l,lprimes=self.lprimes,epsilon=self.epsilon)
             continuum_waves = orb.get_continuum_waves()
             ETotal = self.epsilon
             if isinstance(self.epsilon, int) or isinstance(self.epsilon, float):
