@@ -5,7 +5,7 @@ from numba import jit, prange
 from typing import Sequence
 
 
-@nb.vectorize([nb.complex64(nb.float32), nb.complex128(nb.float64)])
+# @nb.vectorize([nb.complex64(nb.float32), nb.complex128(nb.float64)])
 def complex_exponential(x):
     """
     Calculate the complex exponential.
@@ -13,7 +13,7 @@ def complex_exponential(x):
     return np.cos(x) + 1.j * np.sin(x)
 
 
-@nb.vectorize([nb.float32(nb.complex64), nb.float64(nb.complex128)])
+# @nb.vectorize([nb.float32(nb.complex64), nb.float64(nb.complex128)])
 def abs2(x):
     """
     Calculate the absolute square of a complex number.
