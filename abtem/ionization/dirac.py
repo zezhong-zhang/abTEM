@@ -16,10 +16,7 @@ class orbital:
         self.n = n
         self.l = l
         self.lprimes = lprimes
-        if isinstance(epsilon, np.ndarray):
-            self.epsilon = epsilon
-        else:
-            self.epsilon = np.asarray([epsilon]).flatten()
+        self.epsilon = epsilon
 
     @property
     def config(self,ionised=False):
@@ -111,56 +108,53 @@ class orbital:
         fac.ConfigEnergy(1)
 
         continum_waves = []
-        for epsilon in self.epsilon:
-            continum_waves_per_epsilon = []
-            for k in self.kappa:
-                fac.WaveFuncTable("orbital.txt", self.n, k, epsilon)
-                fac.Reinit(config=1)
+        for k in self.kappa:
+            fac.WaveFuncTable("orbital.txt", self.n, k, self.epsilon)
+            fac.Reinit(config=1)
 
-                with open("orbital.txt", "r") as content_file:
-                    content = content_file.read()
+            with open("orbital.txt", "r") as content_file:
+                content = content_file.read()
 
-                self.ilast = int(re.search("ilast\\s+=\\s+([0-9]+)", content).group(1))
-                self.energy = float(re.search("energy\\s+=\\s+([^\\n]+)\\n", content).group(1))
-                # Load information into table
-                table = np.loadtxt("orbital.txt", skiprows=15)
+            self.ilast = int(re.search("ilast\\s+=\\s+([0-9]+)", content).group(1))
+            self.energy = float(re.search("energy\\s+=\\s+([^\\n]+)\\n", content).group(1))
+            # Load information into table
+            table = np.loadtxt("orbital.txt", skiprows=15)
 
-                # Load radial grid (in atomic units)
-                self.r = table[:, 1]
+            # Load radial grid (in atomic units)
+            self.r = table[:, 1]
 
-                # Load large component of wave function
-                self.wfn_table = table[: self.ilast, 4]
+            # Load large component of wave function
+            self.wfn_table = table[: self.ilast, 4]
 
-                # For continuum wave function also change normalization units from
-                # 1/sqrt(k) in atomic units to units of 1/sqrt(Angstrom eV)
-                # wavenumber in atomic units
-                ke = np.sqrt(2 * epsilon / units.Hartree * (1 + units.alpha ** 2 * epsilon / units.Hartree / 2))
-                # Normalization used in flexible atomic code
-                # sqrt_ke =  np.sqrt(ke)
-                # Desired normalization from Manson 1972 1 / np.sqrt(np.pi) / (epsilon / units.Rydberg) ** 0.25
-                norm = 1 / np.sqrt(np.pi) 
+            # For continuum wave function also change normalization units from
+            # 1/sqrt(k) in atomic units to units of 1/sqrt(Angstrom eV)
+            # wavenumber in atomic units
+            ke = np.sqrt(2 * self.epsilon / units.Hartree * (1 + units.alpha ** 2 * self.epsilon / units.Hartree / 2))
+            # Normalization used in flexible atomic code
+            # sqrt_ke =  np.sqrt(ke)
+            # Desired normalization from Manson 1972 1 / np.sqrt(np.pi) / (self.epsilon / units.Rydberg) ** 0.25
+            norm = 1 / np.sqrt(np.pi) 
 
-                # If continuum wave function load phase-amplitude solution
-                self.amplitude = table[:, 2] * norm
-                self.phase = table[:, 3]
-                self.wfn_table *= norm 
+            # If continuum wave function load phase-amplitude solution
+            self.amplitude = table[:, 2] * norm
+            self.phase = table[:, 3]
+            self.wfn_table *= norm 
 
-                wvfn = np.zeros(self.r.shape, dtype=np.float)
+            wvfn = np.zeros(self.r.shape, dtype=np.float)
 
-                wvfn[:self.ilast-1] = self.wfn_table[:self.ilast-1]
-                # Tabulated
-                TB = self.wfn_table[self.ilast-1]
-                # Phase amplitude
-                PA = self.amplitude[self.ilast+1] * np.sin(self.phase[self.ilast+1])
-                r1 = self.r[self.ilast-1]
-                r2 = self.r[self.ilast+1]
-                wvfn[self.ilast-1:self.ilast+2] = interp1d([r1,r2],[TB,PA])(self.r[self.ilast-1:self.ilast+2])
-                wvfn[self.ilast+2:] = self.amplitude[self.ilast+2:] * np.sin(self.phase[self.ilast+2:])
-                # For bound wave functions we simply interpolate the
-                # tabulated values of a0 the wavefunction
-                cwave = interp1d(self.r, wvfn, kind="cubic", fill_value=0)
-                continum_waves_per_epsilon.append(cwave)
-            continum_waves.append(continum_waves_per_epsilon)
+            wvfn[:self.ilast-1] = self.wfn_table[:self.ilast-1]
+            # Tabulated
+            TB = self.wfn_table[self.ilast-1]
+            # Phase amplitude
+            PA = self.amplitude[self.ilast+1] * np.sin(self.phase[self.ilast+1])
+            r1 = self.r[self.ilast-1]
+            r2 = self.r[self.ilast+1]
+            wvfn[self.ilast-1:self.ilast+2] = interp1d([r1,r2],[TB,PA])(self.r[self.ilast-1:self.ilast+2])
+            wvfn[self.ilast+2:] = self.amplitude[self.ilast+2:] * np.sin(self.phase[self.ilast+2:])
+            # For bound wave functions we simply interpolate the
+            # tabulated values of a0 the wavefunction
+            cwave = interp1d(self.r, wvfn, kind="cubic", fill_value=0)
+            continum_waves.append(cwave)
         return continum_waves
 
 

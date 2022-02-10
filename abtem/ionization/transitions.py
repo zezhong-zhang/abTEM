@@ -186,8 +186,6 @@ class SubshellTransitions(AbstractTransitionCollection):
             orb = orbital(Z=self.Z,n=0,l=self.l,lprimes=self.lprimes,epsilon=self.epsilon)
             continuum_waves = orb.get_continuum_waves()
             ETotal = self.epsilon
-            if isinstance(self.epsilon, int) or isinstance(self.epsilon, float):
-                continuum_waves = continuum_waves[0]
             return ETotal, continuum_waves
     
     @cached_method('_continuum_potential_cache')
