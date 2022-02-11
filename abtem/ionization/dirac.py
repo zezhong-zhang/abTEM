@@ -1,9 +1,12 @@
 from pfac import fac 
 from abtem.ionization.utils import config_str_to_config_tuples,load_electronic_configurations
+from abtem.base_classes import Cache, cached_method
 import re
 import numpy as np
 from scipy.interpolate import interp1d
 from ase import units
+from ase.data import chemical_symbols
+import os
 
 class orbital:
     """
@@ -17,6 +20,8 @@ class orbital:
         self.l = l
         self.lprimes = lprimes
         self.epsilon = epsilon
+        self.element = chemical_symbols[self.Z]
+        self._potential_cache = Cache(1)
 
     @property
     def config(self,ionised=False):
@@ -60,19 +65,29 @@ class orbital:
         else:
             return -1 - self.l
 
+    @cached_method('_potential_cache')
+    def atomic_potential(self):
+        filename = f'{self.element}.pot'
+        exist = os.path.exists(filename)
+        if exist == True:
+            fac.RestorePotential(filename)
+        else:
+            # Get atom
+            fac.SetAtom(self.element)
+            # Set up configuration
+            fac.Config(self.configstring, self.config)
+            # Optimize atomic energy levels
+            fac.ReinitRadial(0)
+            fac.ConfigEnergy(0)
+            # Optimize radial wave functions
+            fac.OptimizeRadial(self.configstring)
+            # Optimize energy levels
+            fac.ConfigEnergy(1)
+            fac.SavePotential(filename)
+
     def get_bound_wave(self):
         assert self.n > 0
-        # Get atom
-        fac.SetAtom(fac.ATOMICSYMBOL[self.Z])
-        # Set up configuration
-        fac.Config(self.configstring, self.config)
-        # Optimize atomic energy levels
-        fac.ReinitRadial(0)
-        fac.ConfigEnergy(0)
-        # Optimize radial wave functions
-        fac.OptimizeRadial(self.configstring)
-        # Optimize energy levels
-        fac.ConfigEnergy(1)
+        self.atomic_potential()
         # Output desired wave function from table
         fac.WaveFuncTable("orbital.txt", self.n, self.kappa)
         fac.Reinit(config=1)
@@ -90,23 +105,12 @@ class orbital:
 
         # Load large component of wave function
         self.wfn_table = table[: self.ilast, 4]
-        bound_wave = interp1d(table[: self.ilast, 1], table[: self.ilast, 4], kind="cubic", fill_value=0)
+        bound_wave = interp1d(table[: self.ilast, 1], table[: self.ilast, 4], kind="cubic", fill_value=0, bounds_error=False)
         return bound_wave
 
     def get_continuum_waves(self):
         assert self.n == 0 
-        # Get atom
-        fac.SetAtom(fac.ATOMICSYMBOL[self.Z])
-        # Set up configuration
-        fac.Config(self.configstring, self.config)
-        # Optimize atomic energy levels
-        fac.ReinitRadial(0)
-        fac.ConfigEnergy(0)
-        # Optimize radial wave functions
-        fac.OptimizeRadial(self.configstring)
-        # Optimize energy levels
-        fac.ConfigEnergy(1)
-
+        self.atomic_potential()
         continum_waves = []
         for k in self.kappa:
             fac.WaveFuncTable("orbital.txt", self.n, k, self.epsilon)
@@ -153,7 +157,7 @@ class orbital:
             wvfn[self.ilast+2:] = self.amplitude[self.ilast+2:] * np.sin(self.phase[self.ilast+2:])
             # For bound wave functions we simply interpolate the
             # tabulated values of a0 the wavefunction
-            cwave = interp1d(self.r, wvfn, kind="cubic", fill_value=0)
+            cwave = interp1d(self.r, wvfn, kind="cubic", fill_value=0, bounds_error=False)
             continum_waves.append(cwave)
         return continum_waves
 
