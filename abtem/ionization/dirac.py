@@ -1,11 +1,11 @@
 from pfac import fac 
 from abtem.ionization.utils import config_str_to_config_tuples,load_electronic_configurations
 from abtem.base_classes import Cache, cached_method
-import re
-import numpy as np
 from scipy.interpolate import interp1d
 from ase import units
 from ase.data import chemical_symbols
+import numpy as np
+import re
 import os
 
 class orbital:
@@ -14,19 +14,20 @@ class orbital:
 
     Code originally from py_multislice by Hamish Brown, adpated for abTEM by Zezhong Zhang. 
     """
-    def __init__(self, Z: int, n: int, l: int, lprimes, epsilon):
+    def __init__(self, Z: int, n: int, l: int, lprimes, epsilon, ion = False):
         self.Z = Z
         self.n = n
         self.l = l
         self.lprimes = lprimes
         self.epsilon = epsilon
+        self.ion = ion
         self.element = chemical_symbols[self.Z]
-        self._potential_cache = Cache(1)
+        # self._potential_cache = Cache(1)
 
     @property
-    def config(self,ionised=False):
-        config_tuples = config_str_to_config_tuples(load_electronic_configurations()[fac.ATOMICSYMBOL[self.Z]])
-        if ionised is False:
+    def config(self):
+        config_tuples = config_str_to_config_tuples(load_electronic_configurations()[self.element])
+        if self.ion is False:
             config = ' '.join(["".join(str(n)+["s","p","d","f"][l]+str(f)) for n,l,f in config_tuples]) 
         else:
             for n,l,f in config_tuples:
@@ -39,9 +40,9 @@ class orbital:
     @property
     def configstring(self):
         if self.n == 0:
-            configstring = fac.ATOMICSYMBOL[self.Z] + "_ex"
+            configstring = self.element + "_ex"
         else:
-            configstring = fac.ATOMICSYMBOL[self.Z] + "_bound"
+            configstring = self.element + "_bound"
         return configstring
 
     # @property 
@@ -50,11 +51,11 @@ class orbital:
     #         # Bound wave function case
     #         angmom = ["s","p","d","f","g","h","i"][self.l]
     #         # Title in the format "Ag 1s", "O 2s" etc..
-    #         return "{0} {1}{2}".format(fac.ATOMICSYMBOL[self.Z], self.n, angmom)
+    #         return "{0} {1}{2}".format(self.element, self.n, angmom)
     #     else:
     #         # Continuum wave function case
     #         # Title in the format "Ag e = 10 eV l'=2" etc..
-    #         return "{0} e = {1} l' = {2}".format(fac.ATOMICSYMBOL[self.Z], self.epsilon, self.lprimes)
+    #         return "{0} e = {1} l' = {2}".format(self.element, self.epsilon, self.lprimes)
 
     @property 
     def kappa(self):
@@ -65,9 +66,13 @@ class orbital:
         else:
             return -1 - self.l
 
-    @cached_method('_potential_cache')
+    # @cached_method('_potential_cache')
     def atomic_potential(self):
-        filename = f'{self.element}.pot'
+        if self.ion == True:
+            filename = f'{self.element}_ion_nl_{self.n}_{self.l}.pot'
+        else:
+            filename = f'{self.element}.pot'
+        
         exist = os.path.exists(filename)
         if exist == True:
             fac.RestorePotential(filename)
