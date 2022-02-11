@@ -128,7 +128,8 @@ class SubshellTransitions(AbstractTransitionCollection):
             with open(os.devnull, "w") as f, contextlib.redirect_stdout(f):
                 ae = AllElectron(chemical_symbols[self.Z], xcname=self.xc, gpernode=self.gpernode)
                 ae.run()
-
+            
+            self.rmax = max(ae.r)
             wave = interp1d(ae.r, ae.u_j[subshell_index], kind='cubic', fill_value='extrapolate', bounds_error=False)
             # return ae.ETotal * units.Hartree, (ae.r, ae.u_j[subshell_index])
             return ae.ETotal * units.Hartree, wave
@@ -137,8 +138,8 @@ class SubshellTransitions(AbstractTransitionCollection):
             orb = orbital(Z=self.Z,n=self.n,l=self.l,lprimes=self.lprimes,epsilon=self.epsilon)
             wave = orb.get_bound_wave()
             ETotal = orb.energy
+            self.rmax = max(orb.r)
             return ETotal, wave 
-
 
     @cached_method('_continuum_cache')
     def _calculate_continuum(self):
@@ -453,7 +454,7 @@ class ProjectedAtomicTransition(AbstractProjectedAtomicTransition):
         return (np.abs(self.build()) ** 2).sum()
 
     def overlap_integral(self, k, lprimeprime):
-        rmax = 20
+        rmax = self.rmax
         # rmax = max(self._bound_wave[1])
         grid = 2 * np.pi * k * units.Bohr
         # r = np.geomspace(1e-7, rmax, 1000000)
@@ -633,7 +634,7 @@ class GeneralOsilationStrength:
     def __init__(self,
                  transitions,
                  energy: float = 3e5,
-                 qmin: float = 0.01,
+                 qmin: float = 0.1,
                  qmax: float = 20,
                  qgpts: int = 1024,
                  ionization_energy: float = None,
@@ -646,6 +647,7 @@ class GeneralOsilationStrength:
         self.l = transitions.l
         self.lprimes = transitions.lprimes
         self.subshell_occupancy=transitions.subshell_occupancy
+        self.rmax = transitions.rmax
         
         if ionization_energy is not None:
             self.energy_loss = transitions.epsilon + ionization_energy
@@ -672,7 +674,7 @@ class GeneralOsilationStrength:
             for lprimeprime in range(abs(l - lprime), np.abs(l + lprime) + 1, 2):
                 prefactor1 = 2*lprimeprime+1
                 prefactor2 = float(wigner_3j(lprime, lprimeprime, l, 0, 0, 0))**2
-                jk = self.overlap_integral(self.qsampling, lprime, lprimeprime)
+                jk = self.overlap_integral(self.ksampling, lprime, lprimeprime)
                 s2 += self.subshell_occupancy*prefactor0*prefactor1*prefactor2*jk**2
             s2_list.append(s2)
         return s2_list
@@ -729,8 +731,8 @@ class GeneralOsilationStrength:
             return thetaE/energy2wavelength(self.energy)
 
     def overlap_integral(self, k, lprime, lprimeprime):
-        grid = k * units.Bohr
-        rmax = 200
+        grid = 2 * np.pi * k * units.Bohr
+        rmax = self.rmax
 
         func = lambda r:(self._bound_wave(r) *
                         spherical_jn(lprimeprime, grid[:, None] * r[None]) 
@@ -742,6 +744,10 @@ class GeneralOsilationStrength:
     @property
     def qsampling(self):
         return np.geomspace(self.qmin, self.qmax, num=self.qgpts)
+    
+    @property
+    def ksampling(self):
+        return np.geomspace(self.qmin, self.qmax, num=self.qgpts)/2/np.pi
 
     @property
     def Q(self):
@@ -749,7 +755,7 @@ class GeneralOsilationStrength:
 
     @property
     def angle(self):
-        theta = np.arccos((self.k0**2+self.kn**2-(self.qsampling)**2)/(2*self.k0*self.kn))
+        theta = np.arccos((self.k0**2+self.kn**2-(self.ksampling)**2)/(2*self.k0*self.kn))
         print('unit in mrad')
         return theta*1e3
 
