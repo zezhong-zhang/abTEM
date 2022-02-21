@@ -2,7 +2,12 @@
 from abc import abstractmethod, ABCMeta
 from typing import Mapping, Union, Sequence
 from numbers import Number
-from collections import Iterable
+try:
+    # Python <= 3.9
+    from collections import Iterable
+except ImportError:
+    # Python > 3.9
+    from collections.abc import Iterable
 
 import numpy as np
 from ase import Atoms
