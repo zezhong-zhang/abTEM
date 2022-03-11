@@ -642,6 +642,7 @@ class GeneralOsilationStrength:
                  ):
 
         self.Z = transitions.Z
+        self.n = transitions.n
         self._bound_wave = transitions.get_bound_wave()
         self._continuum_waves = transitions.get_continuum_waves()
         self.l = transitions.l
@@ -674,47 +675,43 @@ class GeneralOsilationStrength:
             for lprimeprime in range(abs(l - lprime), np.abs(l + lprime) + 1, 2):
                 prefactor1 = 2*lprimeprime+1
                 prefactor2 = float(wigner_3j(lprime, lprimeprime, l, 0, 0, 0))**2
-                jk = self.overlap_integral(self.ksampling, lprime, lprimeprime)
+                jk = self.overlap_integral(self.qsampling, lprime, lprimeprime)
                 s2 += self.subshell_occupancy*prefactor0*prefactor1*prefactor2*jk**2
             s2_list.append(s2)
         return s2_list
 
-    def get_gos(self):
+    def get_gos(self,sumed=True,unit='eV'):
         gos_list=[]
         for lprime in self.lprimes:
             gos = self.energy_loss/units.Rydberg/(self.qsampling*units.Bohr)**2*self.dynamic_form_factor()[lprime]
             gos_list.append(gos)
         # to remove the divergence behaviour at q->0 when delta l = 0
-        # if self._lprime == self._l:
-        #     idx = self.qsampling > 1
-        #     qsampling_new = np.insert(self.qsampling[idx], 0, 0, axis=0) 
-        #     gos_new  = np.insert(gos[idx], 0, 0, axis=0) 
-        #     gos = interp1d(qsampling_new,gos_new)(self.qsampling)
-        return gos_list
+        if lprime == self.l:
+            idx = self.qsampling > 0.1
+            qsampling_new = np.insert(self.qsampling[idx], 0, 0, axis=0) 
+            gos_new  = np.insert(gos[idx], 0, 0, axis=0) 
+            gos = interp1d(qsampling_new,gos_new,kind='cubic')(self.qsampling)
+        if unit =='eV':
+            gos_list = [g/units.Ry for g in gos_list]
+        if sumed == True:
+            return np.sum(gos_list,axis=0)
+        else:
+            return gos_list
     
-    def double_diff_cross_section_dE_dOmega(self):
-        scs_list=[]
-        for lprime in self.lprimes:
-            scs = 4*relativistic_mass_correction(self.energy)**2/(units.Bohr**2*self.qsampling**4)*self.kn/self.k0*self.dynamic_form_factor()[lprime]
-            scs_list.append(scs)
-        return scs_list
+    def scs_dE_dOmega(self):
+        scs = 4*relativistic_mass_correction(self.energy)**2/(units.Bohr**2*self.qsampling**4)*self.kn/self.k0*np.sum(self.dynamic_form_factor(),axis=0)/units.Ry
+        return scs
     
-    def double_diff_cross_section_dE_dlnQ(self):
-        scs_list=[]
-        for lprime in self.lprimes:
-            scs = 4*np.pi*relativistic_mass_correction(self.energy)**2/self.Q/self.k0**2*self.dynamic_form_factor()[lprime]
-            scs_list.append(scs)
-        return scs_list
+    def scs_dE_dlnQ(self):
+        scs = 4*np.pi*relativistic_mass_correction(self.energy)**2/self.Q/self.k0**2*np.sum(self.dynamic_form_factor(),axis=0)/units.Ry
+        return scs
 
-    def get_diff_cross_section(self):
-        scs_list=[]
+    def scs_integrate_q(self):
         Qmax = (self.k0**2+self.kn**2-2*self.kn*self.k0*np.cos(self.collection_angle/1000))*units.Bohr**2
-        ln_Qmax = np.log(Qmax)
-        for lprime in self.lprimes:
-            func = interp1d(np.log(self.Q), self.double_diff_cross_section_dE_dlnQ()[lprime])
-            value,err = integrate_adaptive(func,[0,ln_Qmax],eps_rel=1e-10)
-            scs_list.append(value)
-        return scs_list
+        Qmin = ((self.k0-self.kn)*units.Bohr)**2
+        func = interp1d(np.log(self.Q), self.scs_dE_dlnQ())
+        value,err = integrate_adaptive(func,[np.log(Qmin),np.log(Qmax)],eps_rel=1e-10)
+        return value
     
     def characteristic_angle(self, unit = 'mrad', relativisitc = True):
         if relativisitc:
@@ -730,8 +727,8 @@ class GeneralOsilationStrength:
             print('unit in A-1')
             return thetaE/energy2wavelength(self.energy)
 
-    def overlap_integral(self, k, lprime, lprimeprime):
-        grid = 2 * np.pi * k * units.Bohr
+    def overlap_integral(self, q, lprime, lprimeprime):
+        grid = q * units.Bohr
         rmax = self.rmax
 
         func = lambda r:(self._bound_wave(r) *
@@ -755,14 +752,44 @@ class GeneralOsilationStrength:
 
     @property
     def angle(self):
-        theta = np.arccos((self.k0**2+self.kn**2-(self.ksampling)**2)/(2*self.k0*self.kn))
+        theta = np.arccos((self.k0**2+self.kn**2-(self.qsampling)**2)/(2*self.k0*self.kn))
         print('unit in mrad')
         return theta*1e3
 
     @property
     def k0(self):
-        return 1 /energy2wavelength(self.energy)
+        return 2*np.pi /energy2wavelength(self.energy)
     
     @property
     def kn(self):
-        return 1 /energy2wavelength(self.energy-self.energy_loss)
+        return 2*np.pi /energy2wavelength(self.energy-self.energy_loss)
+    
+    @property
+    def spin_orbital_occupancy(self):
+        if self.l == 0:
+            return 1
+        else: 
+            return np.array([2*(self.l-1/2)+1,2*(self.l+1/2)+1])/(4*self.l+2)
+    @property
+    def edge_name(self):
+        edge = ["K","L","M","N","O","P","Q"][self.n]
+        allow_index = [self.l*2, self.l*2+1].remove(0)
+        return [edge+str(index) for index in allow_index]
+
+
+def scs_dE_dlnQ(energy,Q,dynamic_form_factor):
+    k0 = 2*np.pi /energy2wavelength(energy)
+    scs = 4*np.pi*relativistic_mass_correction(energy)**2/Q/k0**2*np.sum(dynamic_form_factor,axis=1)/units.Ry
+    return scs
+
+def scs_integrate_q(energy,energy_loss,Q,collection_angle,scs_dE_dlnQ):
+    scs_list = []
+    k0 = 2*np.pi /energy2wavelength(energy)
+    for e in energy_loss:
+        kn = 2*np.pi /energy2wavelength(energy-e)
+        Qmax = (k0**2+kn**2-2*kn*k0*np.cos(collection_angle/1000))*units.Bohr**2
+        Qmin = ((k0-kn)*units.Bohr)**2
+        func = interp1d(np.log(Q), scs_dE_dlnQ)
+        value,err = integrate_adaptive(func,[np.log(Qmin),np.log(Qmax)],eps_rel=1e-10)
+        scs_list.append(value)
+    return scs_list
