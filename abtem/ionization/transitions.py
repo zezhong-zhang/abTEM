@@ -2,6 +2,7 @@ import contextlib
 import os
 from abc import ABCMeta, abstractmethod
 from typing import Union, Sequence, Tuple
+from cv2 import error
 
 import numpy as np
 from ase import units
@@ -632,38 +633,43 @@ class TransitionPotential(HasAcceleratorMixin, HasGridMixin):
 
 class GeneralOsilationStrength:
     def __init__(self,
-                 transitions,
+                 Z,
+                 n,
+                 l,
+                 order,
                  energy: float = 3e5,
                  qmin: float = 0.1,
-                 qmax: float = 20,
-                 qgpts: int = 1024,
-                 ionization_energy: float = None,
+                 qmax: float = 50,
+                 qgpts: int = 256,
                  collection_angle: float = 1,
+                 ionization_energy: float = None,
+                 epsilons: list = None,
                  ):
 
-        self.Z = transitions.Z
-        self.n = transitions.n
-        self._bound_wave = transitions.get_bound_wave()
-        self._continuum_waves = transitions.get_continuum_waves()
-        self.l = transitions.l
-        self.lprimes = transitions.lprimes
-        self.subshell_occupancy=transitions.subshell_occupancy
-        self.rmax = transitions.rmax
-        
-        if ionization_energy is not None:
-            self.energy_loss = transitions.epsilon + ionization_energy
-        else:
-            self.energy_loss = transitions.energy_loss
-
+        self.Z = Z
+        self.n = n
+        self.l = l
+        self.order = order
+        self.transitions = SubshellTransitions(Z = Z, n = n, l = l, epsilon = 1, order = order, dirac = True)
+        self.lprimes = self.transitions.lprimes
+        self.subshell_occupancy=self.transitions.subshell_occupancy
         self.energy = energy
         self.qmax = qmax
         self.qmin = qmin
         self.qgpts = qgpts
         self.collection_angle = collection_angle
-        self._dynamic_form_factor_cache = Cache(1)
+        self._bound_wave = self.transitions.get_bound_wave()
+        self.epsilons = epsilons
+        if ionization_energy is not None:
+            self.ionization_energy =  ionization_energy
+        else:
+            self.ionization_energy = self.transitions.ionization_energy
+        self.energy_losses = self.epsilons + self.ionization_energy
+
+        self._gos_cache = Cache(1)
         # self._cache = Cache(1)
 
-    @cached_method('_dynamic_form_factor_cache')
+    # @cached_method('_dynamic_form_factor_cache')
     def dynamic_form_factor(self):
         from sympy.physics.wigner import wigner_3j
         s2_list = []
@@ -678,40 +684,49 @@ class GeneralOsilationStrength:
                 jk = self.overlap_integral(self.qsampling, lprime, lprimeprime)
                 s2 += self.subshell_occupancy*prefactor0*prefactor1*prefactor2*jk**2
             s2_list.append(s2)
-        return s2_list
+        return np.array(s2_list)
 
+    @cached_method('_gos_cache')
     def get_gos(self,sumed=True,unit='eV'):
-        gos_list=[]
-        for lprime in self.lprimes:
-            gos = self.energy_loss/units.Rydberg/(self.qsampling*units.Bohr)**2*self.dynamic_form_factor()[lprime]
-            gos_list.append(gos)
-        # to remove the divergence behaviour at q->0 when delta l = 0
-        if lprime == self.l:
-            idx = self.qsampling > 0.1
-            qsampling_new = np.insert(self.qsampling[idx], 0, 0, axis=0) 
-            gos_new  = np.insert(gos[idx], 0, 0, axis=0) 
-            gos = interp1d(qsampling_new,gos_new,kind='cubic')(self.qsampling)
-        if unit =='eV':
-            gos_list = [g/units.Ry for g in gos_list]
-        if sumed == True:
-            return np.sum(gos_list,axis=0)
-        else:
-            return gos_list
-    
+        gos_matrix = []
+        for epsilon in self.epsilons:
+            self.transitions._epsilon = epsilon
+            self.energy_loss = epsilon + self.ionization_energy
+            self.transitions._continuum_cache.clear()
+            self._continuum_waves = self.transitions.get_continuum_waves()
+
+            gos_list = self.energy_loss/units.Rydberg/(self.qsampling*units.Bohr)**2*self.dynamic_form_factor()
+            # to remove the divergence behaviour at q->0 when delta l = 0
+            mask = self.qsampling > 0.1
+            qsampling_new = np.insert(self.qsampling[mask], 0, 0, axis=0)
+            gos_new  = np.insert(gos_list[self.l][mask], 0, 0, axis=0)
+            gos_list[self.l] = interp1d(qsampling_new,gos_new,kind='cubic')(self.qsampling)
+
+            if unit =='eV':
+                gos_list = np.array(gos_list)/units.Ry
+            if sumed == True:
+                gos_list = np.sum(gos_list,axis=0)
+            gos_matrix.append(gos_list)
+        return np.array(gos_matrix)
+
     def scs_dE_dOmega(self):
         scs = 4*relativistic_mass_correction(self.energy)**2/(units.Bohr**2*self.qsampling**4)*self.kn/self.k0*np.sum(self.dynamic_form_factor(),axis=0)/units.Ry
         return scs
     
     def scs_dE_dlnQ(self):
-        scs = 4*np.pi*relativistic_mass_correction(self.energy)**2/self.Q/self.k0**2*np.sum(self.dynamic_form_factor(),axis=0)/units.Ry
+        scs = 4*np.pi*relativistic_mass_correction(self.energy)**2/self.k0**2*self.get_gos()/self.energy_losses.reshape(-1,1)*units.Rydberg
         return scs
 
     def scs_integrate_q(self):
-        Qmax = (self.k0**2+self.kn**2-2*self.kn*self.k0*np.cos(self.collection_angle/1000))*units.Bohr**2
-        Qmin = ((self.k0-self.kn)*units.Bohr)**2
-        func = interp1d(np.log(self.Q), self.scs_dE_dlnQ())
-        value,err = integrate_adaptive(func,[np.log(Qmin),np.log(Qmax)],eps_rel=1e-10)
-        return value
+        scs_list = []
+        for idx,loss in enumerate(self.energy_losses):
+            self.energy_loss = loss
+            Qmax = (self.k0**2+self.kn**2-2*self.kn*self.k0*np.cos(self.collection_angle/1000))*units.Bohr**2
+            Qmin = ((self.k0-self.kn)*units.Bohr)**2
+            func = interp1d(np.log(self.Q), self.scs_dE_dlnQ()[idx,:])
+            value,err = integrate_adaptive(func,[np.log(Qmin),np.log(Qmax)],eps_rel=1e-10)
+            scs_list.append(value)
+        return scs_list
     
     def characteristic_angle(self, unit = 'mrad', relativisitc = True):
         if relativisitc:
@@ -729,7 +744,7 @@ class GeneralOsilationStrength:
 
     def overlap_integral(self, q, lprime, lprimeprime):
         grid = q * units.Bohr
-        rmax = self.rmax
+        rmax = self.transitions.rmax
 
         func = lambda r:(self._bound_wave(r) *
                         spherical_jn(lprimeprime, grid[:, None] * r[None]) 
@@ -741,10 +756,6 @@ class GeneralOsilationStrength:
     @property
     def qsampling(self):
         return np.geomspace(self.qmin, self.qmax, num=self.qgpts)
-    
-    @property
-    def ksampling(self):
-        return np.geomspace(self.qmin, self.qmax, num=self.qgpts)/2/np.pi
 
     @property
     def Q(self):
@@ -776,20 +787,139 @@ class GeneralOsilationStrength:
         allow_index = [self.l*2, self.l*2+1].remove(0)
         return [edge+str(index) for index in allow_index]
 
+class AtomicScatteringFactor:
+    def __init__(self,
+                 Z,
+                 n,
+                 l,
+                 order,
+                 energy: float = 3e5,
+                 smax: float =20,
+                 spts: int = 1024,
+                 ionization_energy: float = None,
+                 epsilon_list: list =  None,
+                 energy_loss_list: list = None,
+                 ):
 
-def scs_dE_dlnQ(energy,Q,dynamic_form_factor):
-    k0 = 2*np.pi /energy2wavelength(energy)
-    scs = 4*np.pi*relativistic_mass_correction(energy)**2/Q/k0**2*np.sum(dynamic_form_factor,axis=1)/units.Ry
-    return scs
+        self.Z = Z
+        self.n = n
+        self.l = l
+        self.order = order
+        self.transitions = SubshellTransitions(Z = Z, n = n, l = l, epsilon = 1, order = order, dirac = True)
+        self.lprimes = self.transitions.lprimes
+        self.energy = energy
+        self.smax = smax
+        self.spts = spts
+        self._bound_wave = self.transitions.get_bound_wave()
+        
+        
+        if ionization_energy is not None:
+            self.ionization_energy =  ionization_energy
+        else:
+            self.ionization_energy = self.transitions.ionization_energy
 
-def scs_integrate_q(energy,energy_loss,Q,collection_angle,scs_dE_dlnQ):
+        if epsilon_list is None and energy_loss_list is not None:
+            self.energy_loss_list = np.array(energy_loss_list)
+            self.epsilon_list = self.energy_loss_list - self.ionization_energy
+        elif epsilon_list is not None and energy_loss_list is None:
+            self.epsilon_list = np.array(epsilon_list)
+            self.energy_loss_list = self.epsilon_list + self.ionization_energy
+        else:
+            print("Please give the energy loss as list or energy loss above ionization edge (epsilons) as list.")
+        
+        self.energy_loss = self.energy_loss_list[0] # init the energy_loss with the first value in the list
+
+    def edx_scattering_form_factor(self):
+        from sympy.physics.wigner import wigner_3j
+        from scipy.special import legendre
+        I_intsolid_list = []
+        for energy_loss in self.energy_loss_list:
+            self.energy_loss = energy_loss
+            self.transitions._epsilon = energy_loss - self.ionization_energy
+            self.transitions._continuum_cache.clear()
+            self._continuum_waves = self.transitions.get_continuum_waves()
+            I_list = []
+            l = self.l
+            for lprime in self.lprimes:
+                I = np.zeros(self.q0.shape, dtype=np.float64)
+                # lprimeprime only valid from |l-lprime| to l+lprime in step of 2, see Manson 1972 
+                for lprimeprime in range(abs(l - lprime), np.abs(l + lprime) + 1, 2):
+                    wigners = float(wigner_3j(lprime, lprimeprime, l, 0, 0, 0))**2
+                    jk0 = self.overlap_integral(self.q0, lprime, lprimeprime)
+                    jks = self.overlap_integral(self.qs, lprime, lprimeprime)
+                    I += (4*np.pi)**2*(2*l+1)*(2*lprime+1)*(2*lprimeprime+1)*wigners*jk0*jks*np.polyval(legendre(lprimeprime),np.cos(self.alpha))
+                I_list.append(I)
+            I_sum = np.sum(I_list,axis=0)/self.q0**2/self.qs**2
+            I_sum = interp1d(self.theta_sampling,I_sum)
+            func_solid = lambda theta:(np.sin(theta)*2*np.pi*I_sum(theta))
+            I_intsolid,err = integrate_adaptive(func_solid,[0,np.pi],eps_rel=1e-10)
+            I_intsolid = I_intsolid*self.kn
+            I_intsolid_list.append(I_intsolid) 
+        I_intsolid_list = interp1d(self.energy_loss_list,I_intsolid_list,kind='cubic',fill_value="extrapolate")   
+        func_energy = lambda energy_loss: I_intsolid_list(energy_loss) #TODO: can we just use interp1d instead of lambda
+        I_intenery,err = integrate_adaptive(func_energy,[0,self.energy],eps_rel=1e-10)
+        fs = (1/2*np.pi**3*units.Bohr**2)*I_intenery
+        return fs
+    
+    @property
+    def ssampling(self):
+        return np.linspace(0, self.smax, num=self.spts)
+
+    @property
+    def theta_sampling(self):
+        return np.linspace(0,np.pi,num=self.spts)
+    
+    @property
+    def qs(self):
+        return np.sin(np.pi-self.beta)/np.sin(self.alpha)*4*np.pi*self.ssampling
+    
+    @property
+    def q0(self):
+        return np.sqrt(self.k0**2+self.kn**2-2*self.k0*self.kn*np.cos(self.theta_sampling))
+
+    @property
+    # the angle between q and s
+    def beta(self):
+        return np.arcsin(self.q0/(4*np.pi*self.ssampling)*np.sin(self.alpha))+self.alpha
+    
+    @property
+    # the angle between q0 and qs 
+    def alpha(self):
+        return np.linspace(0,np.pi,num=self.spts)
+        
+    @property
+    def k0(self):
+        return 2*np.pi /energy2wavelength(self.energy)
+    
+    @property
+    def kn(self):
+        return 2*np.pi /energy2wavelength(self.energy-self.energy_loss)
+
+    def overlap_integral(self, q, lprime, lprimeprime):
+        grid = q * units.Bohr
+        rmax = self.transitions.rmax
+
+        func = lambda r:(self._bound_wave(r) *
+                        spherical_jn(lprimeprime, grid[:, None] * r[None]) 
+                        * self._continuum_waves[lprime](r))
+
+        value,err = integrate_adaptive(func,[0,rmax],eps_rel=1e-10)
+        return value
+
+
+# for evulate cross-section via gos outside of class
+def scs_integrate_q(voltage,gos,energy_loss,qsampling,collection_angle):
+    k0 = 2*np.pi /energy2wavelength(voltage)
+    Q = (qsampling*units.Bohr)**2
+    scs_dE_dlnQ = 4*np.pi*relativistic_mass_correction(voltage)**2/k0**2*gos/energy_loss.reshape(-1,1)*units.Rydberg
     scs_list = []
-    k0 = 2*np.pi /energy2wavelength(energy)
-    for e in energy_loss:
-        kn = 2*np.pi /energy2wavelength(energy-e)
+    for idx,loss in enumerate(energy_loss):
+        kn = 2*np.pi /energy2wavelength(voltage-loss)
         Qmax = (k0**2+kn**2-2*kn*k0*np.cos(collection_angle/1000))*units.Bohr**2
         Qmin = ((k0-kn)*units.Bohr)**2
-        func = interp1d(np.log(Q), scs_dE_dlnQ)
+        func = interp1d(np.log(Q), scs_dE_dlnQ[idx,:])
         value,err = integrate_adaptive(func,[np.log(Qmin),np.log(Qmax)],eps_rel=1e-10)
         scs_list.append(value)
-    return scs_list
+    return np.array(scs_list)
+
+
