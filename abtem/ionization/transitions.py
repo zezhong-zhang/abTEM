@@ -673,18 +673,15 @@ class GeneralOsilationStrength:
 
     # @cached_method('_dynamic_form_factor_cache')
     def dynamic_form_factor(self):
-        from sympy.physics.wigner import wigner_3j
         s2_list = []
         l = self.l
         for lprime in self.lprimes:
             s2 = np.zeros(self.qsampling.shape, dtype=np.float64)
-            prefactor0 = 2*lprime+1
             # lprimeprime only valid from |l-lprime| to l+lprime in step of 2, see Manson 1972 
             for lprimeprime in range(abs(l - lprime), np.abs(l + lprime) + 1, 2):
-                prefactor1 = 2*lprimeprime+1
-                prefactor2 = float(wigner_3j(lprime, lprimeprime, l, 0, 0, 0))**2
+                wigners = float(wigner_3j(lprime, lprimeprime, l, 0, 0, 0))**2
                 jk = self.overlap_integral(self.qsampling, lprime, lprimeprime)
-                s2 += self.subshell_occupancy*prefactor0*prefactor1*prefactor2*jk**2
+                s2 += self.subshell_occupancy*(2*lprime+1)*(2*lprimeprime+1)*wigners*jk**2
             s2_list.append(s2)
         return np.array(s2_list)
 
@@ -712,8 +709,15 @@ class GeneralOsilationStrength:
         return np.array(gos_matrix)
 
     def scs_dE_dOmega(self):
-        scs = 4*relativistic_mass_correction(self.energy)**2/(units.Bohr**2*self.qsampling**4)*self.kn/self.k0*np.sum(self.dynamic_form_factor(),axis=0)/units.Ry
-        return scs
+        scs_list=[]
+        for epsilon in self.epsilons:
+            self.transitions._epsilon = epsilon
+            self.energy_loss = epsilon + self.ionization_energy
+            self.transitions._continuum_cache.clear()
+            self._continuum_waves = self.transitions.get_continuum_waves()
+            scs = 4*relativistic_mass_correction(self.energy)**2/(units.Bohr**2*self.qsampling**4)*self.kn/self.k0*np.sum(self.dynamic_form_factor(),axis=0)/units.Rydberg
+            scs_list.append(scs)
+        return scs_list
     
     def scs_dE_dlnQ(self):
         scs = 4*np.pi*relativistic_mass_correction(self.energy)**2/self.k0**2*self.get_gos()/self.energy_losses.reshape(-1,1)*units.Rydberg
@@ -725,6 +729,7 @@ class GeneralOsilationStrength:
         scs_list = []
         for idx,loss in enumerate(self.energy_losses):
             self.energy_loss = loss
+            # theta = np.arcsin(self.k0/self.kn*np.tan(self.collection_angle/1000))
             Qmax = (self.k0**2+self.kn**2-2*self.kn*self.k0*np.cos(self.collection_angle/1000))*units.Bohr**2
             Qmin = ((self.k0-self.kn)*units.Bohr)**2
             func = interp1d(np.log(self.Q), self.scs_dE_dlnQ()[idx,:])
@@ -766,10 +771,9 @@ class GeneralOsilationStrength:
         return (units.Bohr*self.qsampling)**2
 
     @property
-    def angle(self):
-        theta = np.arccos((self.k0**2+self.kn**2-(self.qsampling)**2)/(2*self.k0*self.kn))
+    def theta(self):
         print('unit in mrad')
-        return theta*1e3
+        return np.arccos((self.k0**2+self.kn**2-(self.qsampling)**2)/(2*self.k0*self.kn))*1e3
 
     @property
     def k0(self):
@@ -796,7 +800,6 @@ class AtomicScatteringFactor:
                  Z,
                  n,
                  l,
-                 order,
                  energy: float = 3e5,
                  smax: float =20,
                  spts: int = 256,
@@ -804,19 +807,17 @@ class AtomicScatteringFactor:
                  ionization_energy: float = None,
                  epsilon_list: list =  None,
                  energy_loss_list: list = None,
+                 convergence: float = 0.001,
                  ):
 
         self.Z = Z
         self.n = n
         self.l = l
-        self.order = order
         self.energy = energy
         self.smax = smax
         self.spts = spts
         self.apts = apts
-        transitions = SubshellTransitions(Z = Z, n = n, l = l, epsilon = 1, order = order, dirac = True)
-        self._bound_wave = transitions.get_bound_wave()
-        self.rmax = transitions.rmax
+        self.convergence = convergence
         
         if ionization_energy is not None:
             self.ionization_energy =  ionization_energy
@@ -832,59 +833,82 @@ class AtomicScatteringFactor:
         else:
             print("Please give the energy loss as list or energy loss above ionization edge (epsilons) as list.")
         
-        # self.energy_loss = self.energy_loss_list[0] # init the energy_loss with the first value in the list
-
-    def edx_scattering_form_factor(self):
-        with Pool() as pool:
-            I_per_energy = np.array(pool.map(self.edx_scattering_form_factor_per_energy, self.energy_loss_list))
-        func_energy = interp1d(self.energy_loss_list,np.array(I_per_energy).T,kind='cubic',fill_value="extrapolate")   
-        I_ienery,err = integrate_adaptive(func_energy,[self.energy_loss_list[0],self.energy_loss_list[-1]],eps_rel=1e-10)
-        fs = 1/(2*np.pi**3*units.Bohr**2)*I_ienery
-        return fs
-    
-    def edx_scattering_form_factor_per_energy(self,energy_loss):
+        orb = orbital(Z=self.Z,n=self.n,l=self.l,lprimes=0,epsilon=self.epsilon_list[0])
+        self._bound_wave = orb.get_bound_wave()
+        self.rmax = max(orb.r)
+        
+    def dynamic_form_factor(self,energy_loss):
         self.energy_loss = energy_loss
-        epsilon = energy_loss - self.ionization_energy
-        order = int(np.ceil((epsilon/units.Rydberg)**(1/2))) + 1
-        transitions = SubshellTransitions(Z = self.Z, n = self.n, l = self.l, epsilon = epsilon, order = order, dirac = True)
-        bound_wave = self._bound_wave
         l = self.l
-        I_list = []
-        continuum_waves = transitions.get_continuum_waves()
+        epsilon = energy_loss - self.ionization_energy
+        order = 2*int(np.ceil((epsilon/units.Rydberg)**(1/3))) + 1
+        min_new_l = max(l - order, 0)
+        lprimes = np.arange(min_new_l, l + order + 1)
+        # bound_wave = self._bound_wave
+        orb = orbital(Z=self.Z,n=0,l=l,lprimes=lprimes,epsilon=epsilon)
+        # continuum_waves = orb.get_continuum_waves()
+        self._continuum_waves = orb.get_continuum_waves()
+        s2_list = []
 
-        for lprime in transitions.lprimes:
-            I = np.zeros([self.spts,self.apts], dtype=np.float64)
+        for lprime in lprimes:
+            s2 = np.zeros([self.spts,self.apts], dtype=np.float64)
             # lprimeprime only valid from |l-lprime| to l+lprime in step of 2, see Manson 1972 
             for lprimeprime in range(abs(l - lprime), np.abs(l + lprime) + 1, 2):
                 wigners = float(wigner_3j(lprime, lprimeprime, l, 0, 0, 0))**2
-                jk0 = self.overlap_integral(self.q0, lprime, lprimeprime,bound_wave,continuum_waves)
-                jks = self.overlap_integral(self.qs, lprime, lprimeprime,bound_wave,continuum_waves)
-                I += (4*np.pi)**2*(2*l+1)*(2*lprime+1)*(2*lprimeprime+1)*wigners*jk0*jks*np.polyval(legendre(lprimeprime),np.cos(self.alpha))
-            I_list.append(I)
-            if np.max(np.sum(I,axis=1)/np.sum(np.array(I_list),axis=(0,2)))<0.001:
+                jk0 = self.overlap_integral(self.q, lprime, lprimeprime)
+                jks = self.overlap_integral(self.qs, lprime, lprimeprime)
+                s2 += 2*(2*l+1)*(2*lprime+1)*(2*lprimeprime+1)*wigners*jk0*jks*np.polyval(legendre(lprimeprime),np.cos(self.alpha))
+            s2 = np.abs(s2)
+            s2_list.append(s2)
+            contribution = np.mean(np.sum(s2,axis=1)/np.sum(np.array(s2_list),axis=(0,2)))
+            print(f'epsilon = {epsilon:.2f} eV, lprime = {lprime}, contriubtion = {contribution:.3f}, kn ={self.kn}\n')
+            if contribution <self.convergence: #convergence criteria
                 break
+        return s2_list
 
-        I_sum = np.sum(I_list,axis=0)/self.q0**2/self.qs**2
-        I_sum = interp1d(self.theta,I_sum)
+    def edx_scattering_form_factor_integral_solid_angle(self,energy_loss):
+        s2_list = self.dynamic_form_factor(energy_loss)
+        I_sum = np.sum(s2_list,axis=0)/self.q**2/self.qs**2
+        I_sum = interp1d(self.theta,I_sum,kind='quadratic')
         func_solid = lambda theta:(np.sin(theta)*2*np.pi*I_sum(theta))
         I_intsolid,err = integrate_adaptive(func_solid,[0,np.pi],eps_rel=1e-10)
-        I_intsolid = I_intsolid*self.kn
-        return I_intsolid
+        fs = 8/np.pi*relativistic_mass_correction(self.energy)**2/(units.Bohr**2)*I_intsolid*self.kn/units.Rydberg
+        return fs
+
+    def edx_scattering_form_factor_dOmega(self,energy_loss):
+        s2_list = self.dynamic_form_factor(energy_loss)
+        s2_sum = np.sum(s2_list,axis=0)/self.q**2/self.qs**2
+        before_integral = 8/np.pi*relativistic_mass_correction(self.energy)**2/(units.Bohr**2)*s2_sum*self.kn/units.Rydberg
+        func_solid = interp1d(self.theta,before_integral*np.sin(self.theta)*2*np.pi,kind='quadratic')
+        after_integral,err = integrate_adaptive(func_solid,[0,np.pi],eps_rel=1e-10)
+        return before_integral,after_integral
+
+    def get_edx_scattering_form_factor(self):
+        with Pool() as pool: #parallel computing
+            fs_per_energy = np.array(pool.map(self.edx_scattering_form_factor_integral_solid_angle, self.energy_loss_list))
+        # fs_per_energy = []
+        # for index, energy_loss in enumerate(self.energy_loss_list):
+        #     fs_per_energy.append(self.edx_scattering_form_factor_integral_solid_angle(energy_loss))
+        func_energy = interp1d(self.energy_loss_list,np.array(fs_per_energy).T,kind='quadratic') 
+        fs_ienery,err = integrate_adaptive(func_energy,[self.energy_loss_list[0],self.energy_loss_list[-1]],eps_rel=1e-10)
+        return fs_ienery,fs_per_energy
 
     @property
     def s(self):
-        return np.geomspace(1e-5,self.smax,num=self.spts)
+        sampling = np.geomspace(1e-5,self.smax,num=self.spts-1)
+        return np.insert(sampling,0,0,axis=0)
 
     @property
     def theta(self):
-        return np.linspace(1e-5,np.pi,num=self.apts)
-    
+        sampling = np.geomspace(1e-5,np.pi,num=self.apts-1)
+        return np.insert(sampling,0,0,axis=0)
+
     @property
     def qs(self):
-        return np.sqrt(np.tile(self.q0**2,[self.spts,1])+np.tile((4*np.pi*self.s)**2,[self.apts,1]).T-2*np.outer((4*np.pi*self.s),self.q0*np.cos(self.beta)))
+        return np.sqrt(np.tile(self.q**2,[self.spts,1])+np.tile((4*np.pi*self.s)**2,[self.apts,1]).T-2*np.outer((4*np.pi*self.s),self.q*np.cos(self.beta)))
     
     @property
-    def q0(self):
+    def q(self):
         return np.sqrt(self.k0**2+self.kn**2-2*self.k0*self.kn*np.cos(self.theta))
 
     @property
@@ -898,10 +922,11 @@ class AtomicScatteringFactor:
     @property
     # the angle between q and s
     def beta(self):
-        return np.pi-np.arctan(self.qz/self.qt)
+        with np.errstate(divide='ignore'):
+            return np.pi-np.arctan(self.qz/self.qt)
     
     @property
-    # the angle between q0 and qs 
+    # the angle between q and qs 
     def alpha(self):
         return np.arcsin(np.sin(self.beta)/self.qs*4*np.pi*np.tile(self.s,[self.apts,1]).T)
         
@@ -913,12 +938,12 @@ class AtomicScatteringFactor:
     def kn(self):
         return 2*np.pi /energy2wavelength(self.energy-self.energy_loss)
 
-    def overlap_integral(self, q, lprime, lprimeprime,bound_wave,continuum_waves):
+    def overlap_integral(self, q, lprime, lprimeprime):
         grid = q * units.Bohr
 
-        func = lambda r:(bound_wave(r) *
+        func = lambda r:(self._bound_wave(r) *
                         spherical_jn(lprimeprime, grid[..., None] * r) 
-                        * continuum_waves[lprime](r))
+                        * self._continuum_waves[lprime](r))
 
         value,err = integrate_adaptive(func,[0,self.rmax],eps_rel=1e-10)
         return value

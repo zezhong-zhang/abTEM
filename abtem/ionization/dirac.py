@@ -1,3 +1,4 @@
+from fileinput import filename
 from pfac import fac 
 from abtem.ionization.utils import config_str_to_config_tuples,load_electronic_configurations
 from abtem.base_classes import Cache, cached_method
@@ -7,7 +8,8 @@ from ase.data import chemical_symbols
 import numpy as np
 import re
 import os
-
+import random
+import string
 class orbital:
     """
     A class for storing the results of a fac atomic structure calculation,
@@ -92,18 +94,20 @@ class orbital:
 
     def get_bound_wave(self):
         assert self.n > 0
+
         self.atomic_potential()
         # Output desired wave function from table
-        fac.WaveFuncTable("orbital.txt", self.n, self.kappa)
+        filename = self.element + '_orbital_bounded.txt'
+        fac.WaveFuncTable(filename, self.n, self.kappa)
         fac.Reinit(config=1)
 
-        with open("orbital.txt", "r") as content_file:
+        with open(filename, "r") as content_file:
             content = content_file.read()
 
         self.ilast = int(re.search("ilast\\s+=\\s+([0-9]+)", content).group(1))
         self.energy = float(re.search("energy\\s+=\\s+([^\\n]+)\\n", content).group(1))
         # Load information into table
-        table = np.loadtxt("orbital.txt", skiprows=15)
+        table = np.loadtxt(filename, skiprows=15)
 
         # Load radial grid (in atomic units)
         self.r = table[:, 1]
@@ -117,17 +121,18 @@ class orbital:
         assert self.n == 0 
         self.atomic_potential()
         continum_waves = []
+        filename_continuum = self.element + '_orbital_continuum_'+"{}".format(self.epsilon)+'eV_'+'.txt'
         for k in self.kappa:
-            fac.WaveFuncTable("orbital.txt", self.n, k, self.epsilon)
+            fac.WaveFuncTable(filename_continuum, self.n, k, self.epsilon)
             fac.Reinit(config=1)
 
-            with open("orbital.txt", "r") as content_file:
+            with open(filename_continuum, "r") as content_file:
                 content = content_file.read()
 
             self.ilast = int(re.search("ilast\\s+=\\s+([0-9]+)", content).group(1))
             self.energy = float(re.search("energy\\s+=\\s+([^\\n]+)\\n", content).group(1))
             # Load information into table
-            table = np.loadtxt("orbital.txt", skiprows=15)
+            table = np.loadtxt(filename_continuum, skiprows=15)
 
             # Load radial grid (in atomic units)
             self.r = table[:, 1]
