@@ -27,6 +27,7 @@ from sympy.physics.wigner import wigner_3j
 from scipy.special import legendre
 from abtem.ionization.dirac import orbital
 from joblib import Parallel, delayed
+import logging as log
 # from numba import jit,njit
 # from concurrent.futures import ThreadPoolExecutor
 
@@ -807,10 +808,10 @@ class AtomicScatteringFactor:
                  energy: float = 3e5,
                  smax: float =20,
                  spts: int = 256,
-                 qpts: int = 64,
+                 qpts: int = 32,
                  ionization_energy: float = None,
                  epsilon_list: list =  None,
-                 energy_loss_list: list = None,
+                 epsilon_sampling: int = 32,
                  convergence: float = 0.001,
                  ):
 
@@ -825,21 +826,18 @@ class AtomicScatteringFactor:
         orb = orbital(Z=self.Z,n=self.n,l=self.l,lprimes=0,epsilon=0)
         self._bound_wave = orb.get_bound_wave()
         self.rmax = max(orb.r)
-        self._energy_loss = 0
-
+        
         if ionization_energy is not None:
             self.ionization_energy =  ionization_energy
         else:
-            self.ionization_energy = -orb.energy
+            self.ionization_energy = np.abs(orb.energy)
 
-        if epsilon_list is None and energy_loss_list is not None:
-            self.energy_loss_list = np.array(energy_loss_list)
-            self.epsilon_list = self.energy_loss_list - self.ionization_energy
-        elif epsilon_list is not None and energy_loss_list is None:
-            self.epsilon_list = np.array(epsilon_list)
-            self.energy_loss_list = self.epsilon_list + self.ionization_energy
+        if epsilon_list is None:
+            self.epsilon_list = np.geomspace(1e-3,self.energy-self.ionization_energy-1e3,epsilon_sampling)
         else:
-            print("Please give the energy loss as list or energy loss above ionization edge (epsilons) as list.")
+            self.epsilon_list = epsilon_list
+        self.energy_loss_list = self.epsilon_list + self.ionization_energy
+        self._energy_loss = self.energy_loss_list[0]
 
     def sum_states(self,epsilon):
         order = 2*int(np.ceil((epsilon/units.Rydberg)**(1/3))) + 1
@@ -847,44 +845,25 @@ class AtomicScatteringFactor:
         lprimes = np.arange(min_new_l, self.l + order + 1)
         orb = orbital(Z=self.Z,n=0,l=self.l,lprimes=lprimes,epsilon=epsilon)
         self._continuum_waves = orb.get_continuum_waves()
-        # s2_list =[]
         s2_sum = np.zeros([self.spts,self.qpts], dtype=np.float64)
         for lprime in lprimes:
             s2 = np.zeros([self.spts,self.qpts], dtype=np.float64)
             # lprimeprime only valid from |l-lprime| to l+lprime in step of 2, see Manson 1972 
             for lprimeprime in range(abs(self.l - lprime), np.abs(self.l + lprime) + 1, 2):
                 s2 += self.dynamic_form_factor(self.l,lprime,lprimeprime)
-            # s2_list.append(s2)
             s2_sum += s2
             contribution = (np.sum(s2,axis=1)/np.sum(s2_sum,axis=1))[0]
-            # contribution = np.mean(np.sum(s2,axis=1)/np.sum(np.array(s2_list),axis=(0,2)))
-            print(f'epsilon = {epsilon:.2f} eV, lprime = {lprime}, contriubtion = {contribution:.3f}, kn ={self.kn}\n')
-            if contribution <self.convergence: #convergence criteria
+            log.info(f'epsilon = {epsilon:.2f} eV, lprime = {lprime}, contriubtion = {contribution:.3f}, kn ={self.kn}\n')
+            if np.abs(contribution) < self.convergence: #convergence criteria
                 break
-        return s2_sum
-
-    def sum_states_parallel(self,epsilon):
-        order = 2*int(np.ceil((epsilon/units.Rydberg)**(1/3))) + 1
-        min_new_l = max(self.l - order, 0)
-        lprimes = np.arange(min_new_l, self.l + order + 1)
-        orb = orbital(Z=self.Z,n=0,l=self.l,lprimes=lprimes,epsilon=epsilon)
-        self._continuum_waves = orb.get_continuum_waves()
-        states = []
-        for lprime in lprimes:
-            # lprimeprime only valid from |l-lprime| to l+lprime in step of 2, see Manson 1972 
-            for lprimeprime in range(abs(self.l - lprime), np.abs(self.l + lprime) + 1, 2):
-                states.append((self.l,lprime,lprimeprime))
-            # s2_list.append(s2)
-        s2_sum = Parallel(n_jobs=-2)(delayed(self.dynamic_form_factor)(l,lprime,lprimeprime) for l,lprime,lprimeprime in states)
-        s2_sum = np.sum(s2_sum, axis=0)
         return s2_sum
 
     def dynamic_form_factor(self,l,lprime,lprimeprime):
         wigners = float(wigner_3j(lprime, lprimeprime, l, 0, 0, 0))**2
         jk0 = self.overlap_integral(self.q, lprime, lprimeprime)
         jks = self.overlap_integral(self.qs, lprime, lprimeprime)
-        s2 = 2*(2*l+1)*(2*lprime+1)*(2*lprimeprime+1)*wigners*jk0*jks*np.polyval(legendre(lprimeprime),np.cos(self.alpha))
-        s2[s2<0]=0
+        s2 = self.subshell_occupancy*(2*lprime+1)*(2*lprimeprime+1)*wigners*jk0*jks*np.polyval(legendre(lprimeprime),np.cos(self.alpha))
+        # s2[s2<0]=0
         return s2
 
     def overlap_integral(self, q, lprime, lprimeprime):
@@ -895,11 +874,20 @@ class AtomicScatteringFactor:
         value,err = integrate_adaptive(func,[0,self.rmax],eps_rel=1e-10)
         return value
 
+    def test_integral_solid_angle(self,epsilon,kind):
+        self._energy_loss = epsilon + self.ionization_energy
+        I_sum = self.sum_states(epsilon)/self.q**2/self.qs**2
+        I_sum_interp = interp1d(self.theta,I_sum,kind=kind)
+        func_solid = lambda theta:(np.sin(theta)*2*np.pi*I_sum_interp(theta))
+        I_intsolid,err = integrate_adaptive(func_solid,[0,np.pi],eps_rel=1e-10)
+        fs = 4*relativistic_mass_correction(self.energy)**2/(units.Bohr**2)*I_intsolid*self.kn/units.Rydberg
+        return fs, I_sum, I_sum_interp
+
     def integral_solid_angle(self,epsilon):
         self._energy_loss = epsilon + self.ionization_energy
         I_sum = self.sum_states(epsilon)/self.q**2/self.qs**2
-        I_sum = interp1d(self.theta,I_sum,kind='quadratic')
-        func_solid = lambda theta:(np.sin(theta)*2*np.pi*I_sum(theta))
+        I_sum_interp = interp1d(self.theta,I_sum,kind='cubic')
+        func_solid = lambda theta:(np.sin(theta)*2*np.pi*I_sum_interp(theta))
         I_intsolid,err = integrate_adaptive(func_solid,[0,np.pi],eps_rel=1e-10)
         fs = 4*relativistic_mass_correction(self.energy)**2/(units.Bohr**2)*I_intsolid*self.kn/units.Rydberg
         return fs
@@ -930,7 +918,34 @@ class AtomicScatteringFactor:
         # func_energy = interp1d(epsilon_list_new,fs_per_energy_new.T,kind='quadratic') 
         # fs_ienery,err = integrate_adaptive(func_energy,[self.epsilon_list[0],self.energy-self.ionization_energy],eps_rel=1e-10)
         return fs_ienery,fs_per_energy
-        
+
+
+    def test_get_edx_scattering_form_factor(self):
+        with Pool() as pool: #parallel computing
+            fs_per_energy = np.array(pool.map(self.integral_solid_angle, self.epsilon_list))
+        func_energy_lin = interp1d(self.epsilon_list,fs_per_energy.T,kind='slinear') 
+        fs_ienery_lin,err = integrate_adaptive(func_energy_lin,[self.epsilon_list[0],self.epsilon_list[-1]],eps_rel=1e-10)
+        func_energy_qua = interp1d(self.epsilon_list,fs_per_energy.T,kind='quadratic') 
+        fs_ienery_qua,err = integrate_adaptive(func_energy_qua,[self.epsilon_list[0],self.epsilon_list[-1]],eps_rel=1e-10)
+        func_energy_cub = interp1d(self.epsilon_list,fs_per_energy.T,kind='cubic') 
+        fs_ienery_cub,err = integrate_adaptive(func_energy_cub,[self.epsilon_list[0],self.epsilon_list[-1]],eps_rel=1e-10)
+        return fs_ienery_lin,fs_ienery_qua,fs_ienery_cub,fs_per_energy
+
+    # def sum_states_parallel(self,epsilon):
+    #     order = 2*int(np.ceil((epsilon/units.Rydberg)**(1/3))) + 1
+    #     min_new_l = max(self.l - order, 0)
+    #     lprimes = np.arange(min_new_l, self.l + order + 1)
+    #     orb = orbital(Z=self.Z,n=0,l=self.l,lprimes=lprimes,epsilon=epsilon)
+    #     self._continuum_waves = orb.get_continuum_waves()
+    #     states = []
+    #     for lprime in lprimes:
+    #         # lprimeprime only valid from |l-lprime| to l+lprime in step of 2, see Manson 1972 
+    #         for lprimeprime in range(abs(self.l - lprime), np.abs(self.l + lprime) + 1, 2):
+    #             states.append((self.l,lprime,lprimeprime))
+    #     s2_sum = Parallel(n_jobs=-2)(delayed(self.dynamic_form_factor)(l,lprime,lprimeprime) for l,lprime,lprimeprime in states)
+    #     s2_sum = np.sum(s2_sum, axis=0)
+    #     return s2_sum       
+    #  
     # def states_and_waves(self,epsilon):
     #     order = 2*int(np.ceil((epsilon/units.Rydberg)**(1/3))) + 1
     #     min_new_l = max(self.l - order, 0)
@@ -982,7 +997,16 @@ class AtomicScatteringFactor:
 
     @property
     def energy_loss(self):
+        if self._energy_loss > self.energy:
+            raise ValueError("The energy loss should be less than the incident beam energy")
         return self._energy_loss
+
+    @property
+    def subshell_occupancy(self):
+        config_tuples = config_str_to_config_tuples(load_electronic_configurations()[chemical_symbols[self.Z]])
+        subshell_index = [shell[:2] for shell in config_tuples].index((self.n, self.l))
+        subshell_occupancy = config_tuples[subshell_index][-1]
+        return subshell_occupancy
 
     @property
     def s(self):
@@ -1028,8 +1052,6 @@ class AtomicScatteringFactor:
     @property
     def kn(self):
         return 2*np.pi /energy2wavelength(self.energy-self.energy_loss)
-
-
 
 # for evulate cross-section via gos outside of class
 def scs_integrate_q(voltage,gos,energy_loss,qsampling,collection_angle):
