@@ -26,6 +26,10 @@ from itertools import repeat
 from sympy.physics.wigner import wigner_3j
 from scipy.special import legendre
 from abtem.ionization.dirac import orbital
+from joblib import Parallel, delayed
+# from numba import jit,njit
+# from concurrent.futures import ThreadPoolExecutor
+
 class AbstractTransitionCollection(metaclass=ABCMeta):
 
     def __init__(self, Z):
@@ -803,7 +807,7 @@ class AtomicScatteringFactor:
                  energy: float = 3e5,
                  smax: float =20,
                  spts: int = 256,
-                 apts: int = 64,
+                 qpts: int = 64,
                  ionization_energy: float = None,
                  epsilon_list: list =  None,
                  energy_loss_list: list = None,
@@ -816,13 +820,17 @@ class AtomicScatteringFactor:
         self.energy = energy
         self.smax = smax
         self.spts = spts
-        self.apts = apts
+        self.qpts = qpts
         self.convergence = convergence
-        
+        orb = orbital(Z=self.Z,n=self.n,l=self.l,lprimes=0,epsilon=0)
+        self._bound_wave = orb.get_bound_wave()
+        self.rmax = max(orb.r)
+        self._energy_loss = 0
+
         if ionization_energy is not None:
             self.ionization_energy =  ionization_energy
         else:
-            self.ionization_energy = self.transitions.ionization_energy
+            self.ionization_energy = -orb.energy
 
         if epsilon_list is None and energy_loss_list is not None:
             self.energy_loss_list = np.array(energy_loss_list)
@@ -832,66 +840,149 @@ class AtomicScatteringFactor:
             self.energy_loss_list = self.epsilon_list + self.ionization_energy
         else:
             print("Please give the energy loss as list or energy loss above ionization edge (epsilons) as list.")
-        
-        orb = orbital(Z=self.Z,n=self.n,l=self.l,lprimes=0,epsilon=self.epsilon_list[0])
-        self._bound_wave = orb.get_bound_wave()
-        self.rmax = max(orb.r)
-        
-    def dynamic_form_factor(self,energy_loss):
-        self.energy_loss = energy_loss
-        l = self.l
-        epsilon = energy_loss - self.ionization_energy
-        order = 2*int(np.ceil((epsilon/units.Rydberg)**(1/3))) + 1
-        min_new_l = max(l - order, 0)
-        lprimes = np.arange(min_new_l, l + order + 1)
-        # bound_wave = self._bound_wave
-        orb = orbital(Z=self.Z,n=0,l=l,lprimes=lprimes,epsilon=epsilon)
-        # continuum_waves = orb.get_continuum_waves()
-        self._continuum_waves = orb.get_continuum_waves()
-        s2_list = []
 
+    def sum_states(self,epsilon):
+        order = 2*int(np.ceil((epsilon/units.Rydberg)**(1/3))) + 1
+        min_new_l = max(self.l - order, 0)
+        lprimes = np.arange(min_new_l, self.l + order + 1)
+        orb = orbital(Z=self.Z,n=0,l=self.l,lprimes=lprimes,epsilon=epsilon)
+        self._continuum_waves = orb.get_continuum_waves()
+        # s2_list =[]
+        s2_sum = np.zeros([self.spts,self.qpts], dtype=np.float64)
         for lprime in lprimes:
-            s2 = np.zeros([self.spts,self.apts], dtype=np.float64)
+            s2 = np.zeros([self.spts,self.qpts], dtype=np.float64)
             # lprimeprime only valid from |l-lprime| to l+lprime in step of 2, see Manson 1972 
-            for lprimeprime in range(abs(l - lprime), np.abs(l + lprime) + 1, 2):
-                wigners = float(wigner_3j(lprime, lprimeprime, l, 0, 0, 0))**2
-                jk0 = self.overlap_integral(self.q, lprime, lprimeprime)
-                jks = self.overlap_integral(self.qs, lprime, lprimeprime)
-                s2 += 2*(2*l+1)*(2*lprime+1)*(2*lprimeprime+1)*wigners*jk0*jks*np.polyval(legendre(lprimeprime),np.cos(self.alpha))
-            s2 = np.abs(s2)
-            s2_list.append(s2)
-            contribution = np.mean(np.sum(s2,axis=1)/np.sum(np.array(s2_list),axis=(0,2)))
+            for lprimeprime in range(abs(self.l - lprime), np.abs(self.l + lprime) + 1, 2):
+                s2 += self.dynamic_form_factor(self.l,lprime,lprimeprime)
+            # s2_list.append(s2)
+            s2_sum += s2
+            contribution = (np.sum(s2,axis=1)/np.sum(s2_sum,axis=1))[0]
+            # contribution = np.mean(np.sum(s2,axis=1)/np.sum(np.array(s2_list),axis=(0,2)))
             print(f'epsilon = {epsilon:.2f} eV, lprime = {lprime}, contriubtion = {contribution:.3f}, kn ={self.kn}\n')
             if contribution <self.convergence: #convergence criteria
                 break
-        return s2_list
+        return s2_sum
 
-    def edx_scattering_form_factor_integral_solid_angle(self,energy_loss):
-        s2_list = self.dynamic_form_factor(energy_loss)
-        I_sum = np.sum(s2_list,axis=0)/self.q**2/self.qs**2
+    def sum_states_parallel(self,epsilon):
+        order = 2*int(np.ceil((epsilon/units.Rydberg)**(1/3))) + 1
+        min_new_l = max(self.l - order, 0)
+        lprimes = np.arange(min_new_l, self.l + order + 1)
+        orb = orbital(Z=self.Z,n=0,l=self.l,lprimes=lprimes,epsilon=epsilon)
+        self._continuum_waves = orb.get_continuum_waves()
+        states = []
+        for lprime in lprimes:
+            # lprimeprime only valid from |l-lprime| to l+lprime in step of 2, see Manson 1972 
+            for lprimeprime in range(abs(self.l - lprime), np.abs(self.l + lprime) + 1, 2):
+                states.append((self.l,lprime,lprimeprime))
+            # s2_list.append(s2)
+        s2_sum = Parallel(n_jobs=-2)(delayed(self.dynamic_form_factor)(l,lprime,lprimeprime) for l,lprime,lprimeprime in states)
+        s2_sum = np.sum(s2_sum, axis=0)
+        return s2_sum
+
+    def dynamic_form_factor(self,l,lprime,lprimeprime):
+        wigners = float(wigner_3j(lprime, lprimeprime, l, 0, 0, 0))**2
+        jk0 = self.overlap_integral(self.q, lprime, lprimeprime)
+        jks = self.overlap_integral(self.qs, lprime, lprimeprime)
+        s2 = 2*(2*l+1)*(2*lprime+1)*(2*lprimeprime+1)*wigners*jk0*jks*np.polyval(legendre(lprimeprime),np.cos(self.alpha))
+        s2[s2<0]=0
+        return s2
+
+    def overlap_integral(self, q, lprime, lprimeprime):
+        grid = q * units.Bohr
+        func = lambda r:(self._bound_wave(r) *
+                        spherical_jn(lprimeprime, grid[..., None] * r) 
+                        * self._continuum_waves[lprime](r))
+        value,err = integrate_adaptive(func,[0,self.rmax],eps_rel=1e-10)
+        return value
+
+    def integral_solid_angle(self,epsilon):
+        self._energy_loss = epsilon + self.ionization_energy
+        I_sum = self.sum_states(epsilon)/self.q**2/self.qs**2
         I_sum = interp1d(self.theta,I_sum,kind='quadratic')
         func_solid = lambda theta:(np.sin(theta)*2*np.pi*I_sum(theta))
         I_intsolid,err = integrate_adaptive(func_solid,[0,np.pi],eps_rel=1e-10)
-        fs = 8/np.pi*relativistic_mass_correction(self.energy)**2/(units.Bohr**2)*I_intsolid*self.kn/units.Rydberg
+        fs = 4*relativistic_mass_correction(self.energy)**2/(units.Bohr**2)*I_intsolid*self.kn/units.Rydberg
         return fs
 
-    def edx_scattering_form_factor_dOmega(self,energy_loss):
-        s2_list = self.dynamic_form_factor(energy_loss)
-        s2_sum = np.sum(s2_list,axis=0)/self.q**2/self.qs**2
-        before_integral = 8/np.pi*relativistic_mass_correction(self.energy)**2/(units.Bohr**2)*s2_sum*self.kn/units.Rydberg
+    def form_factor_dOmega(self,epsilon):
+        self._energy_loss = epsilon + self.ionization_energy
+        s2_sum = self.sum_states(epsilon)/self.q**2/self.qs**2
+        before_integral = 4*relativistic_mass_correction(self.energy)**2/(units.Bohr**2)*s2_sum*self.kn/units.Rydberg
         func_solid = interp1d(self.theta,before_integral*np.sin(self.theta)*2*np.pi,kind='quadratic')
         after_integral,err = integrate_adaptive(func_solid,[0,np.pi],eps_rel=1e-10)
         return before_integral,after_integral
 
     def get_edx_scattering_form_factor(self):
+        # fs_per_energy=Parallel(n_jobs=-2)(delayed(self.integral_solid_angle)(epsilon) for epsilon in self.epsilon_list)
+
         with Pool() as pool: #parallel computing
-            fs_per_energy = np.array(pool.map(self.edx_scattering_form_factor_integral_solid_angle, self.energy_loss_list))
+            fs_per_energy = np.array(pool.map(self.integral_solid_angle, self.epsilon_list))
+
         # fs_per_energy = []
-        # for index, energy_loss in enumerate(self.energy_loss_list):
-        #     fs_per_energy.append(self.edx_scattering_form_factor_integral_solid_angle(energy_loss))
-        func_energy = interp1d(self.energy_loss_list,np.array(fs_per_energy).T,kind='quadratic') 
-        fs_ienery,err = integrate_adaptive(func_energy,[self.energy_loss_list[0],self.energy_loss_list[-1]],eps_rel=1e-10)
+        # for epsilon in self.epsilon_list:
+        #     fs_per_energy.append(self.integral_solid_angle(epsilon))
+
+        func_energy = interp1d(self.epsilon_list,fs_per_energy.T,kind='quadratic') 
+        fs_ienery,err = integrate_adaptive(func_energy,[self.epsilon_list[0],self.epsilon_list[-1]],eps_rel=1e-10)
+
+        # epsilon_list_new = np.append(self.epsilon_list,self.energy-self.ionization_energy)
+        # fs_per_energy_new = np.append(fs_per_energy,np.zeros((1,self.spts)),axis=0)
+        # func_energy = interp1d(epsilon_list_new,fs_per_energy_new.T,kind='quadratic') 
+        # fs_ienery,err = integrate_adaptive(func_energy,[self.epsilon_list[0],self.energy-self.ionization_energy],eps_rel=1e-10)
         return fs_ienery,fs_per_energy
+        
+    # def states_and_waves(self,epsilon):
+    #     order = 2*int(np.ceil((epsilon/units.Rydberg)**(1/3))) + 1
+    #     min_new_l = max(self.l - order, 0)
+    #     lprimes = np.arange(min_new_l, self.l + order + 1)
+    #     orb = orbital(Z=self.Z,n=0,l=self.l,lprimes=lprimes,epsilon=epsilon)
+    #     continuum_waves = orb.get_continuum_waves()
+    #     states = []
+    #     for lprime in lprimes:
+    #         # lprimeprime only valid from |l-lprime| to l+lprime in step of 2, see Manson 1972 
+    #         for lprimeprime in range(abs(self.l - lprime), np.abs(self.l + lprime) + 1, 2):
+    #             states.append((self.l,lprime,lprimeprime))      
+    #     return states, continuum_waves
+
+    # def dynamic_form_factor_parallel(self,l,lprime,lprimeprime,epsilon,continuum_waves):
+    #     self._energy_loss = epsilon + self.ionization_energy
+    #     wigners = float(wigner_3j(lprime, lprimeprime, l, 0, 0, 0))**2
+    #     jk0 = self.overlap_integral_parallel(self.q, lprime, lprimeprime,continuum_waves)
+    #     jks = self.overlap_integral_parallel(self.qs, lprime, lprimeprime,continuum_waves)
+    #     s2 = 2*(2*l+1)*(2*lprime+1)*(2*lprimeprime+1)*wigners*jk0*jks*np.polyval(legendre(lprimeprime),np.cos(self.alpha))
+    #     s2[s2<0]=0
+    #     return s2
+
+    # def overlap_integral_parallel(self, q, lprime, lprimeprime,continuum_waves):
+    #     grid = q * units.Bohr
+    #     func = lambda r:(self._bound_wave(r) *
+    #                     spherical_jn(lprimeprime, grid[..., None] * r) 
+    #                     * continuum_waves[lprime](r))
+    #     value,err = integrate_adaptive(func,[0,self.rmax],eps_rel=1e-10)
+    #     return value
+
+    # def integral_solid_angle_parallel(self,s2_orbitals,epsilon):
+    #     self._energy_loss = epsilon + self.ionization_energy
+    #     I_sum = np.sum(s2_orbitals,axis=0)/self.q**2/self.qs**2
+    #     I_sum = interp1d(self.theta,I_sum,kind='slinear')
+    #     func_solid = lambda theta:(np.sin(theta)*2*np.pi*I_sum(theta))
+    #     I_intsolid,err = integrate_adaptive(func_solid,[0,np.pi],eps_rel=1e-10)
+    #     fs = 4*relativistic_mass_correction(self.energy)**2/(units.Bohr**2)*I_intsolid*self.kn/units.Rydberg
+    #     return fs    
+    
+    # def get_edx_scattering_form_factor_parallel(self):
+    #     from joblib import Parallel, delayed
+    #     states_waves_per_energy = Parallel(n_jobs=-2)(delayed(self.states_and_waves)(epsilon) for epsilon in self.epsilon_list)
+    #     linear_states_waves_per_energy = np.array(states_waves_per_energy).ravel()
+    #     s2_per_energy = Parallel(n_jobs=-2)(delayed(self.dynamic_form_factor_parallel)(l,lprime,lprimeprime,continuum_waves,epsilon) for l,lprime,lprimeprime,continuum_waves,epsilon in zip(linear_states_waves_per_energy,self.epsilon_list))
+    #     fs_per_energy = Parallel(n_jobs=-2)(delayed(self.integral_solid_angle_parallel)(s2_orbitals,epsilon) for s2_orbitals,epsilon in zip(s2_per_energy,self.epsilon_list))
+    #     func_energy = interp1d(self.epsilon_list,np.array(fs_per_energy).T,kind='slinear') 
+    #     fs_ienery,err = integrate_adaptive(func_energy,[self.epsilon_list[0],self.epsilon_list[-1]],eps_rel=1e-10)
+    #     return fs_ienery,fs_per_energy
+
+    @property
+    def energy_loss(self):
+        return self._energy_loss
 
     @property
     def s(self):
@@ -900,12 +991,12 @@ class AtomicScatteringFactor:
 
     @property
     def theta(self):
-        sampling = np.geomspace(1e-5,np.pi,num=self.apts-1)
+        sampling = np.geomspace(1e-5,np.pi,num=self.qpts-1)
         return np.insert(sampling,0,0,axis=0)
 
     @property
     def qs(self):
-        return np.sqrt(np.tile(self.q**2,[self.spts,1])+np.tile((4*np.pi*self.s)**2,[self.apts,1]).T-2*np.outer((4*np.pi*self.s),self.q*np.cos(self.beta)))
+        return np.sqrt(np.tile(self.q**2,[self.spts,1])+np.tile((4*np.pi*self.s)**2,[self.qpts,1]).T-2*np.outer((4*np.pi*self.s),self.q*np.cos(self.beta)))
     
     @property
     def q(self):
@@ -928,7 +1019,7 @@ class AtomicScatteringFactor:
     @property
     # the angle between q and qs 
     def alpha(self):
-        return np.arcsin(np.sin(self.beta)/self.qs*4*np.pi*np.tile(self.s,[self.apts,1]).T)
+        return np.arcsin(np.sin(self.beta)/self.qs*4*np.pi*np.tile(self.s,[self.qpts,1]).T)
         
     @property
     def k0(self):
@@ -937,16 +1028,6 @@ class AtomicScatteringFactor:
     @property
     def kn(self):
         return 2*np.pi /energy2wavelength(self.energy-self.energy_loss)
-
-    def overlap_integral(self, q, lprime, lprimeprime):
-        grid = q * units.Bohr
-
-        func = lambda r:(self._bound_wave(r) *
-                        spherical_jn(lprimeprime, grid[..., None] * r) 
-                        * self._continuum_waves[lprime](r))
-
-        value,err = integrate_adaptive(func,[0,self.rmax],eps_rel=1e-10)
-        return value
 
 
 
